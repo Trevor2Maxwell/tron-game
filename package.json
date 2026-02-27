@@ -1,0 +1,22 @@
+{
+  "name": "tron-light-cycles",
+  "version": "1.0.0",
+  "description": "TRON-themed multiplayer light cycle game",
+  "main": "web-server.js",
+  "scripts": {
+    "start": "node web-server.js",
+    "dev": "node web-server.js"
+  },
+  "keywords": [
+    "tron",
+    "game",
+    "multiplayer",
+    "websocket"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.16.0",
+    "msgpack-lite": "^0.1.26"
+  }
+}
