@@ -3,6 +3,29 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const msgpack = require('msgpack-lite');
+const Database = require('better-sqlite3');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const crypto = require('crypto');
+require('dotenv').config();
+
+// Initialize persistent database
+const db = new Database('/data/tron.db');
+
+// Create tables on first run
+db.exec(`
+  CREATE TABLE IF NOT EXISTS paid_hosts (
+    zoom_user_id TEXT PRIMARY KEY,
+    paid_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS oauth_tokens (
+    zoom_user_id TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
 
 // Efficient comparison functions - avoid expensive JSON.stringify
 function arrayEquals(a, b) {
@@ -858,8 +881,339 @@ class GameState {
     }
 }
 
+// Zoom OAuth Configuration
+const ZOOM_CONFIG = {
+    clientId: process.env.ZOOM_CLIENT_ID || 'YOUR_CLIENT_ID_HERE',
+    clientSecret: process.env.ZOOM_CLIENT_SECRET || 'YOUR_CLIENT_SECRET_HERE',
+    redirectUri: 'https://tron-game-zoom.fly.dev/auth/zoom/callback',
+    authUrl: 'https://zoom.us/oauth/authorize',
+    tokenUrl: 'https://zoom.us/oauth/token'
+};
+
+// OAuth endpoints
+function handleOAuthRoutes(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    console.log('OAuth handler called for:', url.pathname);
+    
+    // Start OAuth flow
+    if (url.pathname === '/auth/zoom') {
+        console.log('OAuth request received');
+        console.log('Client ID:', ZOOM_CONFIG.clientId);
+        
+        if (ZOOM_CONFIG.clientId === 'YOUR_CLIENT_ID_HERE') {
+            res.writeHead(500, { 'Content-Type': 'text/html' });
+            res.end('<h1>OAuth not configured - Client ID not set</h1>');
+            return true;
+        }
+        
+        const authUrl = `${ZOOM_CONFIG.authUrl}?response_type=code&client_id=${ZOOM_CONFIG.clientId}&redirect_uri=${ZOOM_CONFIG.redirectUri}`;
+        console.log('Redirecting to:', authUrl);
+        res.writeHead(302, { 'Location': authUrl });
+        res.end();
+        return true;
+    }
+    
+    // OAuth callback
+    if (url.pathname === '/auth/zoom/callback') {
+        console.log('OAuth callback received');
+        console.log('Full URL:', req.url);
+        
+        const code = url.searchParams.get('code');
+        console.log('Authorization code:', code);
+        
+        if (!code) {
+            console.log('No authorization code received');
+            res.writeHead(400, { 'Content-Type': 'text/html' });
+            res.end('<h1>Authorization failed - no code provided</h1>');
+            return true;
+        }
+        
+        // Exchange code for tokens
+        const tokenData = new URLSearchParams();
+        tokenData.append('code', code);
+        tokenData.append('redirect_uri', ZOOM_CONFIG.redirectUri);
+        tokenData.append('grant_type', 'authorization_code');
+        
+        const tokenRequest = require('https').request({
+            hostname: 'zoom.us',
+            path: '/oauth/token',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': `Basic ${Buffer.from(`${ZOOM_CONFIG.clientId}:${ZOOM_CONFIG.clientSecret}`).toString('base64')}`
+            }
+        }, (tokenRes) => {
+            let data = '';
+            tokenRes.on('data', chunk => data += chunk);
+            tokenRes.on('end', () => {
+                try {
+                    const tokens = JSON.parse(data);
+                    
+                    // Get user info
+                    console.log('Making user info request to Zoom API...');
+                    console.log('Access token (first 10 chars):', tokens.access_token ? tokens.access_token.substring(0, 10) + '...' : 'undefined');
+                    
+                    const userInfoReq = require('https').request({
+                        hostname: 'api.zoom.us',
+                        path: '/v2/users/me',
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${tokens.access_token}`
+                        }
+                    }, (userRes) => {
+                        console.log('User info response status:', userRes.statusCode);
+                        console.log('User info response headers:', userRes.headers);
+                        
+                        let userData = '';
+                        userRes.on('data', chunk => userData += chunk);
+                        userRes.on('end', () => {
+                            console.log('User info response body:', userData);
+                            
+                            if (userRes.statusCode !== 200) {
+                                console.error('Zoom API returned non-200 status:', userRes.statusCode);
+                                res.writeHead(userRes.statusCode, { 'Content-Type': 'text/html' });
+                                res.end(`<h1>Zoom API Error: ${userRes.statusCode}</h1><p>Response: ${userData}</p>`);
+                                return;
+                            }
+                            
+                            try {
+                                const user = JSON.parse(userData);
+                                
+                                // DEBUG: Log user info to find your Zoom user ID
+                                console.log('=== USER INFO ===');
+                                console.log('User ID:', user.id);
+                                console.log('User email:', user.email);
+                                console.log('User name:', user.first_name, user.last_name);
+                                console.log('=================');
+                                
+                                // Store tokens in database
+                                const stmt = db.prepare(`
+                                    INSERT OR REPLACE INTO oauth_tokens 
+                                    (zoom_user_id, access_token, refresh_token, expires_at) 
+                                    VALUES (?, ?, ?, ?)
+                                `);
+                                stmt.run(user.id, tokens.access_token, tokens.refresh_token, Date.now() + (tokens.expires_in * 1000));
+                                
+                                // Check if user has paid
+                                const paidStmt = db.prepare('SELECT 1 FROM paid_hosts WHERE zoom_user_id = ?');
+                                const hasPaid = paidStmt.get(user.id) !== undefined;
+                                
+                                // DEBUG: Always log user info and access status
+                                console.log('=== USER INFO ===');
+                                console.log('User ID:', user.id);
+                                console.log('User email:', user.email);
+                                console.log('User name:', user.first_name, user.last_name);
+                                console.log('Has paid:', hasPaid);
+                                console.log('Environment:', process.env.NODE_ENV || 'production');
+                                console.log('=================');
+                                
+                                // Redirect to game with auth status
+                                const paidStatus = hasPaid ? 'true' : 'false';
+                                const redirectUrl = `/?auth=success&paid=${paidStatus}&user_id=${user.id}&email=${encodeURIComponent(user.email)}&name=${encodeURIComponent(user.first_name + ' ' + user.last_name)}`;
+                                res.writeHead(302, { 'Location': redirectUrl });
+                                res.end();
+                                
+                            } catch (error) {
+                                console.error('Error parsing user data:', error);
+                                console.error('User data received:', userData);
+                                res.writeHead(500, { 'Content-Type': 'text/html' });
+                                res.end('<h1>Error getting user info</h1><p>Failed to parse user data from Zoom API</p>');
+                            }
+                        });
+                    });
+                    
+                    userInfoReq.on('error', (error) => {
+                        console.error('Error making user info request:', error);
+                        res.writeHead(500, { 'Content-Type': 'text/html' });
+                        res.end('<h1>Error fetching user information from Zoom</h1>');
+                    });
+                    
+                    userInfoReq.end();
+                    
+                } catch (error) {
+                    console.error('Error parsing tokens:', error);
+                    res.writeHead(500, { 'Content-Type': 'text/html' });
+                    res.end('<h1>Error processing tokens</h1>');
+                }
+            });
+        });
+        
+        tokenRequest.write(tokenData.toString());
+        tokenRequest.end();
+        return true;
+    }
+    
+    // Check auth status
+    if (url.pathname === '/auth/status') {
+        // This would check session cookies or tokens
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ authenticated: false, paid: false }));
+        return true;
+    }
+    
+    // Create payment session
+    if (url.pathname === '/create-payment-session') {
+        if (req.method !== 'POST') {
+            res.writeHead(405, { 'Content-Type': 'text/html' });
+            res.end('<h1>Method not allowed</h1>');
+            return true;
+        }
+        
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const { zoomUserId, userEmail } = JSON.parse(body);
+                
+                const session = await stripe.checkout.sessions.create({
+                    payment_method_types: ['card'],
+                    mode: 'payment',
+                    line_items: [{
+                        price_data: {
+                            currency: 'usd',
+                            product_data: {
+                                name: 'TRON Game - Lifetime Access',
+                                description: 'Unlimited lifetime access to TRON Light Cycles multiplayer game',
+                                images: ['https://tron-game-zoom.fly.dev/bike.png']
+                            },
+                            unit_amount: 999, // $9.99
+                        },
+                        quantity: 1,
+                    }],
+                    success_url: `https://tron-game-zoom.fly.dev/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                    cancel_url: `https://tron-game-zoom.fly.dev/payment-cancelled`,
+                    customer_email: userEmail,
+                    metadata: {
+                        zoom_user_id: zoomUserId
+                    }
+                });
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ sessionId: session.id, url: session.url }));
+                
+            } catch (error) {
+                console.error('Error creating payment session:', error);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Failed to create payment session' }));
+            }
+        });
+        return true;
+    }
+    
+    // Payment success callback
+    if (url.pathname === '/payment-success') {
+        const sessionId = url.searchParams.get('session_id');
+        
+        if (sessionId) {
+            (async () => {
+                try {
+                    // Verify the session was paid
+                    const session = await stripe.checkout.sessions.retrieve(sessionId);
+                    
+                    if (session.payment_status === 'paid' && session.metadata.zoom_user_id) {
+                        // Add user to paid_hosts table
+                        const stmt = db.prepare('INSERT OR REPLACE INTO paid_hosts (zoom_user_id, paid_at) VALUES (?, CURRENT_TIMESTAMP)');
+                        stmt.run(session.metadata.zoom_user_id);
+                        
+                        console.log(`User ${session.metadata.zoom_user_id} successfully paid for access`);
+                        
+                        // Redirect to game with paid status
+                        res.writeHead(302, { 'Location': `/?auth=success&paid=true` });
+                        res.end();
+                        return;
+                    }
+                } catch (error) {
+                    console.error('Error verifying payment:', error);
+                }
+                
+                // If payment verification fails, show error page
+                res.writeHead(400, { 'Content-Type': 'text/html' });
+                res.end('<h1>Payment verification failed</h1>');
+            })();
+            return true;
+        }
+        
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<h1>Missing payment session ID</h1>');
+        return true;
+    }
+    
+    // Payment cancelled
+    if (url.pathname === '/payment-cancelled') {
+        res.writeHead(302, { 'Location': '/?payment=cancelled' });
+        res.end();
+        return true;
+    }
+    
+    // Stripe webhook handler
+    if (url.pathname === '/webhook') {
+        if (req.method !== 'POST') {
+            res.writeHead(405, { 'Content-Type': 'text/html' });
+            res.end('<h1>Method not allowed</h1>');
+            return true;
+        }
+        
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            const sig = req.headers['stripe-signature'];
+            const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+            
+            if (!webhookSecret) {
+                console.error('STRIPE_WEBHOOK_SECRET not configured');
+                res.writeHead(500, { 'Content-Type': 'text/html' });
+                res.end('<h1>Webhook secret not configured</h1>');
+                return;
+            }
+            
+            try {
+                // Verify webhook signature
+                const event = JSON.parse(body);
+                console.log('Received Stripe webhook:', event.type);
+                
+                // Handle checkout.session.completed event
+                if (event.type === 'checkout.session.completed') {
+                    const session = event.data.object;
+                    
+                    // Extract Zoom user ID from metadata
+                    const zoomUserId = session.metadata?.zoom_user_id;
+                    
+                    if (zoomUserId) {
+                        // Add user to paid_hosts table
+                        const stmt = db.prepare('INSERT OR REPLACE INTO paid_hosts (zoom_user_id, paid_at) VALUES (?, CURRENT_TIMESTAMP)');
+                        stmt.run(zoomUserId);
+                        
+                        console.log(`Payment completed! Added Zoom user ${zoomUserId} to paid_hosts table`);
+                    } else {
+                        console.warn('Payment completed but no Zoom user ID in metadata');
+                    }
+                }
+                
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end('Webhook received');
+                
+            } catch (error) {
+                console.error('Webhook error:', error);
+                res.writeHead(400, { 'Content-Type': 'text/html' });
+                res.end('<h1>Webhook error</h1>');
+            }
+        });
+        return true;
+    }
+    
+    return false;
+}
+
 const httpServer = http.createServer((req, res) => {
-    let filePath = req.url === '/' ? '/index.html' : decodeURIComponent(req.url);
+    console.log('Request received for:', req.url);
+    
+    // Handle OAuth routes first
+    if (handleOAuthRoutes(req, res)) {
+        return;
+    }
+    
+    const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+    let filePath = parsedUrl.pathname === '/' ? '/index.html' : decodeURIComponent(parsedUrl.pathname);
     filePath = path.join(__dirname, filePath);
 
     const extname = path.extname(filePath);

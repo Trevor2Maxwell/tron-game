@@ -2,6 +2,13 @@
 
 A TRON-themed multiplayer light cycle game where you drive a bike leaving a light stream trail. Hit any trail and you respawn!
 
+## 🚨 Important - Before Making Changes
+
+**ALWAYS check documentation first**:
+- See [DEPLOYMENT-CHECKLIST.md](DEPLOYMENT-CHECKLIST.md) for deployment requirements
+- Review [DEVELOPMENT.md](DEVELOPMENT.md) for development guidelines
+- Check existing files before making changes
+
 ## Features
 
 - **Multiplayer**: Support for 2-11 players
@@ -14,77 +21,85 @@ A TRON-themed multiplayer light cycle game where you drive a bike leaving a ligh
 
 ## Installation
 
-1. **Install Python 3.x** (if not already installed)
-   - Download from [python.org](https://www.python.org/downloads/)
+1. **Install Node.js 18+** (if not already installed)
+   - Download from [nodejs.org](https://nodejs.org/)
 
 2. **Install dependencies**:
    ```bash
-   pip install -r requirements.txt
+   npm install
    ```
 
 ## How to Play
 
-### For Local Network (Same WiFi/LAN)
+### Web Browser (Recommended)
 
 #### Host (You):
-1. Find your local IP address:
-   - **Mac/Linux**: Open Terminal and run `ifconfig | grep "inet "` (look for 192.168.x.x)
-   - **Windows**: Open Command Prompt and run `ipconfig` (look for IPv4 Address)
-
-2. Start the server:
+1. Start the server:
    ```bash
-   python server.py
+   npm start
    ```
 
-3. Start your client:
-   ```bash
-   python client.py
+2. Open your browser and go to:
    ```
-   - Enter your name
-   - Server IP: Use `127.0.0.1` (localhost)
-   - Configure number of players and game mode
-   - Press ENTER to connect
+   http://localhost:3000
+   ```
+
+3. Configure the game settings and start playing!
 
 #### Friends (Players):
-1. Start the client:
-   ```bash
-   python client.py
+1. Open their browser and go to:
    ```
-   - Enter your name
-   - Server IP: Enter the host's IP address (e.g., `192.168.1.5`)
-   - Press ENTER to connect
+   http://YOUR_IP_ADDRESS:3000
+   ```
+   (Replace YOUR_IP_ADDRESS with your host's IP)
+
+### For Local Network (Same WiFi/LAN)
+
+#### Find your local IP address:
+- **Mac/Linux**: Open Terminal and run `ifconfig | grep "inet "` (look for 192.168.x.x)
+- **Windows**: Open Command Prompt and run `ipconfig` (look for IPv4 Address)
 
 ### For Internet Play (Different Houses)
 
 #### Host (You):
 1. **Port Forward** on your router:
-   - Forward port `5555` (TCP) to your computer's local IP
+   - Forward port `3000` (TCP) to your computer's local IP
    - Instructions vary by router - search "[your router model] port forwarding"
 
 2. Find your **public IP address**:
-   - Visit [whatismyip.com](https://www.whatismyip.com/)
+   - Visit [whatismyip.com](https://whatismyip.com/)
    - Share this IP with your friends
 
 3. Start the server:
    ```bash
-   python server.py
+   npm start
    ```
-
-4. Start your client and connect to `127.0.0.1`
 
 #### Friends (Players):
-1. Start the client:
-   ```bash
-   python client.py
+1. Open their browser and go to:
    ```
-   - Enter your name
-   - Server IP: Enter the host's **public IP address**
-   - Press ENTER to connect
+   http://YOUR_PUBLIC_IP:3000
+   ```
 
 **Note**: Some ISPs use CGNAT which prevents port forwarding. If this doesn't work, consider using:
-- Hamachi/ZeroTier (creates virtual LAN)
 - ngrok (tunneling service)
-- Cloud hosting (AWS, DigitalOcean, etc.)
+- Cloud hosting (Fly.io, Render, etc.)
+
+### Python Client (Legacy - Deprecated)
+
+The Python client/server is deprecated and not recommended for new deployments. Use the web browser client for the best experience and compatibility with Zoom integration.
+
+**To use legacy Python client (not recommended):**
+```bash
+# Install Python dependencies (deprecated)
+pip install -r requirements.txt
+
+# Start Python server (deprecated)
+python server.py
+
+# Start Python client (deprecated)
+python client.py
+```
 
 ## Game Controls
 
@@ -120,19 +135,19 @@ A TRON-themed multiplayer light cycle game where you drive a bike leaving a ligh
 ## Troubleshooting
 
 ### "Connection refused" error:
-- Make sure the server is running first
-- Check firewall settings (allow Python through firewall)
+- Make sure the Node.js server is running first (`npm start`)
+- Check firewall settings (allow Node.js/Port 3000 through firewall)
 - Verify the IP address is correct
 
 ### Friends can't connect (local network):
 - Ensure all players are on the same WiFi/LAN
-- Check router firewall settings
+- Check router firewall settings (allow port 3000)
 - Try disabling firewall temporarily to test
 
 ### Friends can't connect (internet):
-- Verify port forwarding is configured correctly
+- Verify port forwarding is configured correctly for port 3000
 - Check if ISP uses CGNAT (prevents port forwarding)
-- Try alternative solutions like Hamachi or ngrok
+- Try alternative solutions like ngrok or cloud hosting
 
 ### Game is laggy:
 - Reduce number of players
@@ -141,11 +156,12 @@ A TRON-themed multiplayer light cycle game where you drive a bike leaving a ligh
 
 ## Technical Details
 
-- **Language**: Python 3.x
-- **Graphics**: Pygame
-- **Networking**: TCP Sockets
-- **Server Port**: 5555
+- **Backend**: Node.js 18+
+- **Frontend**: HTML5 Canvas + JavaScript
+- **Networking**: WebSockets (real-time bidirectional)
+- **Server Port**: 3000 (HTTP + WebSocket)
 - **Tick Rate**: 15 FPS
+- **Deployment**: Docker containerized
 
 ## Tips for Best Experience
 

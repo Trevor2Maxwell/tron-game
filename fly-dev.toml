@@ -1,0 +1,32 @@
+# Development app configuration
+app = 'tron-game-dev'
+primary_region = 'ord'
+
+[build]
+
+[mounts]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [http_service.concurrency]
+    type = 'connections'
+    hard_limit = 100
+    soft_limit = 80
+
+[[vm]]
+  memory = '256mb'
+  cpus = 1
+  memory_mb = 256
+
+# Development environment variables
+[env]
+  ZOOM_CLIENT_ID = "YOUR_DEV_CLIENT_ID_HERE"
+  NODE_ENV = "development"
