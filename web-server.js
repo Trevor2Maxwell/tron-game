@@ -4,9 +4,39 @@ const fs = require('fs');
 const path = require('path');
 const msgpack = require('msgpack-lite');
 const Database = require('better-sqlite3');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('stripe')(process.env.STRIPE_API_SECRET);
 const crypto = require('crypto');
 require('dotenv').config();
+
+// Session management functions
+function createSession(userId, email, name) {
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    
+    const stmt = db.prepare(`
+        INSERT INTO user_sessions (session_id, zoom_user_id, user_email, user_name, expires_at)
+        VALUES (?, ?, ?, ?, ?)
+    `);
+    stmt.run(sessionId, userId, email, name, expiresAt.toISOString());
+    
+    return sessionId;
+}
+
+function validateSession(sessionId) {
+    const stmt = db.prepare(`
+        SELECT zoom_user_id, user_email, user_name 
+        FROM user_sessions 
+        WHERE session_id = ? AND expires_at > datetime('now')
+    `);
+    return stmt.get(sessionId);
+}
+
+function cleanupExpiredSessions() {
+    const stmt = db.prepare(`
+        DELETE FROM user_sessions WHERE expires_at <= datetime('now')
+    `);
+    stmt.run();
+}
 
 // Initialize persistent database
 const db = new Database('/data/tron.db');
@@ -15,7 +45,16 @@ const db = new Database('/data/tron.db');
 db.exec(`
   CREATE TABLE IF NOT EXISTS paid_hosts (
     zoom_user_id TEXT PRIMARY KEY,
-    paid_at TEXT DEFAULT CURRENT_TIMESTAMP
+    paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS user_sessions (
+    session_id TEXT PRIMARY KEY,
+    zoom_user_id TEXT NOT NULL,
+    user_email TEXT,
+    user_name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS oauth_tokens (
@@ -951,7 +990,6 @@ function handleOAuthRoutes(req, res) {
                     
                     // Get user info
                     console.log('Making user info request to Zoom API...');
-                    console.log('Access token (first 10 chars):', tokens.access_token ? tokens.access_token.substring(0, 10) + '...' : 'undefined');
                     
                     const userInfoReq = require('https').request({
                         hostname: 'api.zoom.us',
@@ -968,23 +1006,42 @@ function handleOAuthRoutes(req, res) {
                         userRes.on('data', chunk => userData += chunk);
                         userRes.on('end', () => {
                             console.log('User info response body:', userData);
+                            console.log('Response length:', userData.length);
                             
                             if (userRes.statusCode !== 200) {
                                 console.error('Zoom API returned non-200 status:', userRes.statusCode);
+                                console.error('Response body:', userData);
                                 res.writeHead(userRes.statusCode, { 'Content-Type': 'text/html' });
                                 res.end(`<h1>Zoom API Error: ${userRes.statusCode}</h1><p>Response: ${userData}</p>`);
+                                return;
+                            }
+                            
+                            // Validate response data before parsing
+                            if (!userData || userData.trim().length === 0) {
+                                console.error('Empty response from Zoom API');
+                                res.writeHead(500, { 'Content-Type': 'text/html' });
+                                res.end('<h1>Error getting user info</h1><p>Empty response from Zoom API</p>');
+                                return;
+                            }
+                            
+                            // Check if response looks like JSON
+                            if (!userData.trim().startsWith('{')) {
+                                console.error('Response does not appear to be JSON:', userData.substring(0, 200));
+                                res.writeHead(500, { 'Content-Type': 'text/html' });
+                                res.end('<h1>Error getting user info</h1><p>Invalid response format from Zoom API</p>');
                                 return;
                             }
                             
                             try {
                                 const user = JSON.parse(userData);
                                 
-                                // DEBUG: Log user info to find your Zoom user ID
-                                console.log('=== USER INFO ===');
-                                console.log('User ID:', user.id);
-                                console.log('User email:', user.email);
-                                console.log('User name:', user.first_name, user.last_name);
-                                console.log('=================');
+                                // Validate required user fields
+                                if (!user || !user.id || !user.email) {
+                                    console.error('Invalid user data structure:', user);
+                                    res.writeHead(500, { 'Content-Type': 'text/html' });
+                                    res.end('<h1>Error getting user info</h1><p>Invalid user data received from Zoom API</p>');
+                                    return;
+                                }
                                 
                                 // Store tokens in database
                                 const stmt = db.prepare(`
@@ -998,18 +1055,16 @@ function handleOAuthRoutes(req, res) {
                                 const paidStmt = db.prepare('SELECT 1 FROM paid_hosts WHERE zoom_user_id = ?');
                                 const hasPaid = paidStmt.get(user.id) !== undefined;
                                 
-                                // DEBUG: Always log user info and access status
-                                console.log('=== USER INFO ===');
-                                console.log('User ID:', user.id);
-                                console.log('User email:', user.email);
-                                console.log('User name:', user.first_name, user.last_name);
-                                console.log('Has paid:', hasPaid);
-                                console.log('Environment:', process.env.NODE_ENV || 'production');
+                                // DEBUG: Log authentication status only (no personal data)
+                                console.log('=== USER AUTHENTICATED ===');
+                                console.log('User successfully authenticated');
+                                console.log('Payment status checked:', hasPaid);
                                 console.log('=================');
                                 
-                                // Redirect to game with auth status
+                                // Create secure session and redirect (no user data in URL)
+                                const sessionId = createSession(user.id, user.email, user.first_name + ' ' + user.last_name);
                                 const paidStatus = hasPaid ? 'true' : 'false';
-                                const redirectUrl = `/?auth=success&paid=${paidStatus}&user_id=${user.id}&email=${encodeURIComponent(user.email)}&name=${encodeURIComponent(user.first_name + ' ' + user.last_name)}`;
+                                const redirectUrl = `/?auth=success&paid=${paidStatus}&session=${sessionId}`;
                                 res.writeHead(302, { 'Location': redirectUrl });
                                 res.end();
                                 
@@ -1043,11 +1098,58 @@ function handleOAuthRoutes(req, res) {
         return true;
     }
     
-    // Check auth status
+    // Check auth status with session validation
     if (url.pathname === '/auth/status') {
-        // This would check session cookies or tokens
+        const sessionId = url.searchParams.get('session');
+        
+        if (sessionId) {
+            const session = validateSession(sessionId);
+            if (session) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ 
+                    authenticated: true, 
+                    paid: false, // Will be determined by separate check
+                    user: {
+                        id: session.zoom_user_id,
+                        email: session.user_email,
+                        name: session.user_name
+                    }
+                }));
+                return true;
+            }
+        }
+        
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ authenticated: false, paid: false }));
+        return true;
+    }
+    
+    // Get product marketing info from Stripe
+    if (url.pathname === '/product-info') {
+        if (req.method !== 'GET') {
+            res.writeHead(405, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Method not allowed' }));
+            return true;
+        }
+        
+        (async () => {
+            try {
+                const product = await stripe.products.retrieve('prod_UChr0xPDcDuSyl');
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    name: product.name,
+                    description: product.description,
+                    features: product.features || [],
+                    images: product.images || []
+                }));
+                
+            } catch (error) {
+                console.error('Error fetching product info:', error);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Failed to fetch product info' }));
+            }
+        })();
         return true;
     }
     
@@ -1059,42 +1161,60 @@ function handleOAuthRoutes(req, res) {
             return true;
         }
         
+        console.log('Payment session request received');
+        console.log('Stripe configured:', !!stripe);
+        console.log('Stripe secret key configured:', !!process.env.STRIPE_API_SECRET);
+        
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
             try {
-                const { zoomUserId, userEmail } = JSON.parse(body);
+                const { zoomUserId } = JSON.parse(body); // Only need zoomUserId
+                console.log('Payment session creation started');
+                
+                // Look up user data from our database (not client)
+                const userStmt = db.prepare('SELECT user_email FROM user_sessions WHERE zoom_user_id = ? ORDER BY created_at DESC LIMIT 1');
+                const userRecord = userStmt.get(zoomUserId);
+                const userEmail = userRecord ? userRecord.user_email : null;
+                
+                if (!stripe) {
+                    console.error('Stripe not initialized - missing STRIPE_API_SECRET');
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Stripe not configured - missing STRIPE_API_SECRET' }));
+                    return;
+                }
+                
+                // Get product and price from Stripe
+                const product = await stripe.products.retrieve('prod_UChr0xPDcDuSyl'); // Your product ID
+                const price = await stripe.prices.retrieve('price_1TEIS2KlIqX3xNv9pmlDayrP'); // Your price ID
                 
                 const session = await stripe.checkout.sessions.create({
                     payment_method_types: ['card'],
                     mode: 'payment',
                     line_items: [{
-                        price_data: {
-                            currency: 'usd',
-                            product_data: {
-                                name: 'TRON Game - Lifetime Access',
-                                description: 'Unlimited lifetime access to TRON Light Cycles multiplayer game',
-                                images: ['https://tron-game-zoom.fly.dev/bike.png']
-                            },
-                            unit_amount: 999, // $9.99
-                        },
-                        quantity: 1,
+                        price: price.id, // Use dynamic price from Stripe
+                        quantity: 1
                     }],
                     success_url: `https://tron-game-zoom.fly.dev/payment-success?session_id={CHECKOUT_SESSION_ID}`,
                     cancel_url: `https://tron-game-zoom.fly.dev/payment-cancelled`,
                     customer_email: userEmail,
-                    metadata: {
-                        zoom_user_id: zoomUserId
-                    }
+                    discounts: [], // Allow promo codes
+                    allow_promotion_codes: true, // Enable promo code field
+                    tax_id_collection: { enabled: true }, // Show tax breakdown - Canadian digital goods tax ID
+                    metadata: {} // NO USER DATA - Stripe processes payments only
                 });
                 
+                console.log('Stripe session created:', session.id);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ sessionId: session.id, url: session.url }));
                 
             } catch (error) {
                 console.error('Error creating payment session:', error);
+                console.error('Error details:', error.message);
+                console.error('Error type:', error.type);
+                console.error('Error stack:', error.stack);
                 res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Failed to create payment session' }));
+                res.end(JSON.stringify({ error: 'Failed to create payment session: ' + error.message }));
             }
         });
         return true;
@@ -1175,17 +1295,24 @@ function handleOAuthRoutes(req, res) {
                 if (event.type === 'checkout.session.completed') {
                     const session = event.data.object;
                     
-                    // Extract Zoom user ID from metadata
-                    const zoomUserId = session.metadata?.zoom_user_id;
+                    // Find user session that created this payment
+                    const userSessionStmt = db.prepare(`
+                        SELECT zoom_user_id, user_email 
+                        FROM user_sessions 
+                        WHERE created_at >= datetime('now', '-1 hour')
+                        ORDER BY created_at DESC 
+                        LIMIT 1
+                    `);
+                    const userSession = userSessionStmt.get();
                     
-                    if (zoomUserId) {
-                        // Add user to paid_hosts table
+                    if (userSession && userSession.zoom_user_id) {
+                        // Add user to paid_hosts table (permanent record)
                         const stmt = db.prepare('INSERT OR REPLACE INTO paid_hosts (zoom_user_id, paid_at) VALUES (?, CURRENT_TIMESTAMP)');
-                        stmt.run(zoomUserId);
+                        stmt.run(userSession.zoom_user_id);
                         
-                        console.log(`Payment completed! Added Zoom user ${zoomUserId} to paid_hosts table`);
+                        console.log(`Payment completed! Added user ${userSession.zoom_user_id} to paid_hosts table`);
                     } else {
-                        console.warn('Payment completed but no Zoom user ID in metadata');
+                        console.warn('Payment completed but no matching user session found');
                     }
                 }
                 

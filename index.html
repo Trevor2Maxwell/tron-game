@@ -228,7 +228,8 @@
             0%, 100% { opacity: 1; transform: scale(1); }
             50% { opacity: 0.8; transform: scale(1.05); }
         }
-    </style>
+        
+            </style>
 </head>
 <body>
     <div class="grid-bg"></div>
@@ -243,6 +244,10 @@
             </div>
             
             <div class="auth-section">
+                <div class="info-text">
+                    <h3><i class="iconoir-game"></i> <span id="productName">TRON Light Cycles - Multiplayer Game</span></h3>
+                                    </div>
+                
                 <div id="authStatus" class="auth-status">
                     <p style="color: #ff6666;"><i class="iconior-lock"></i> Login required to play</p>
                 </div>
@@ -317,6 +322,9 @@
     </div>
 
     <script>
+        // Stripe Configuration
+        const STRIPE_PUBLISHABLE_KEY = 'pk_live_51S0SgdKlIqX3xNv9SY2PJPBdfXU14O4w4lzWX3LtQYXHmHfn80IvxtlWV2mgQHIcJIC4x21x1EN7bHayzvqlAUBL00I92BYdEX';
+        
         let ws = null;
         let playerId = null;
         let isHost = false;
@@ -345,10 +353,7 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        zoomUserId: currentUser.id,
-                        userEmail: currentUser.email
-                    })
+                    body: JSON.stringify({ zoomUserId: currentUser.id })
                 });
 
                 const data = await response.json();
@@ -367,31 +372,50 @@
 
         function checkAuthStatus() {
             const urlParams = new URLSearchParams(window.location.search);
-            const authSuccess = urlParams.get('auth') === 'success';
-            const paidStatus = urlParams.get('paid') === 'true';
+            const sessionId = urlParams.get('session');
             
-            if (authSuccess) {
-                isAuthenticated = true;
-                hasPaid = paidStatus;
+            if (sessionId) {
+                // Check session with server
+                fetch(`/auth/status?session=${sessionId}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.authenticated) {
+                            isAuthenticated = true;
+                            currentUser = data.user;
+                            
+                            // Check payment status separately
+                            checkPaymentStatus();
+                        } else {
+                            isAuthenticated = false;
+                            currentUser = null;
+                        }
+                        updateAuthUI();
+                    })
+                    .catch(error => {
+                        console.error('Error checking auth status:', error);
+                        isAuthenticated = false;
+                        currentUser = null;
+                        updateAuthUI();
+                    });
+            } else {
+                // Check URL params for old method (backward compatibility)
+                const auth = urlParams.get('auth');
+                const paid = urlParams.get('paid');
                 
-                // Store user info if available
-                const userId = urlParams.get('user_id');
-                const email = urlParams.get('email');
-                const name = urlParams.get('name');
-                
-                if (userId && email) {
-                    currentUser = {
-                        id: userId,
-                        email: email,
-                        name: name || 'User'
-                    };
+                if (auth === 'success') {
+                    isAuthenticated = true;
+                    hasPaid = paid === 'true';
                 }
-                
                 updateAuthUI();
-                
-                // Clean URL but keep auth status
-                const cleanUrl = window.location.pathname + '?auth=success&paid=' + paidStatus;
-                window.history.replaceState({}, document.title, cleanUrl);
+            }
+        }
+        
+        function checkPaymentStatus() {
+            if (currentUser && currentUser.id) {
+                // This would be a separate endpoint to check payment status
+                // For now, we'll use the paid parameter from URL
+                const urlParams = new URLSearchParams(window.location.search);
+                hasPaid = urlParams.get('paid') === 'true';
             }
         }
 
@@ -401,7 +425,7 @@
             
             if (isAuthenticated) {
                 if (hasPaid) {
-                    authStatus.innerHTML = '<p style="color: #00ff00;"><i class="iconoir-check-circle"></i> Zoom authenticated - Lifetime access unlocked!</p>';
+                    authStatus.innerHTML = '<p style="color: #00ff00;"><i class="iconior-check-circle"></i> Zoom authenticated - Lifetime access unlocked!</p>';
                     zoomLoginBtn.style.display = 'none';
                     
                     // Show game screen after successful authentication
@@ -409,8 +433,8 @@
                         showScreen('gameScreen');
                     }, 1000);
                 } else {
-                    authStatus.innerHTML = '<p style="color: #ffff00;"><i class="iconior-lock"></i> Zoom authenticated - One-time payment for lifetime of fun with colleagues!</p>';
-                    zoomLoginBtn.textContent = 'UNLOCK LIFETIME ACCESS';
+                    authStatus.innerHTML = '<p style="color: #ffff00;"><i class="iconior-lock"></i> Zoom authenticated - Get lifetime access to play!</p>';
+                    zoomLoginBtn.textContent = 'LIFETIME ACCESS';
                     zoomLoginBtn.onclick = initiatePayment;
                     zoomLoginBtn.style.display = 'block';
                 }
@@ -508,6 +532,28 @@
         }
 
         // Initialize auth status on page load
+        // Fetch product marketing content from Stripe
+        async function loadProductInfo() {
+            try {
+                const response = await fetch('/product-info');
+                const product = await response.json();
+                
+                if (product.name) {
+                    document.getElementById('productName').textContent = product.name;
+                }
+                
+                if (product.description) {
+                    // Product description available but marketing features removed
+                    console.log('Product description:', product.description);
+                }
+                
+            } catch (error) {
+                console.error('Error loading product info:', error);
+                // Fallback to default content stays visible
+            }
+        }
+        
+        loadProductInfo();
         checkAuthStatus();
         updateAuthUI();
     </script>

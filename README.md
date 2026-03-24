@@ -19,6 +19,112 @@ A TRON-themed multiplayer light cycle game where you drive a bike leaving a ligh
 - **Network Play**: Play with friends on local network OR over the internet
 - **Dynamic Map Sizes**: Map size automatically adjusts based on number of players
 
+## 🗄️ Persistent Storage (Fly.io Volume)
+
+### **Volume Configuration:**
+- **Path**: `/data` (mounted in container)
+- **Size**: 1GB persistent storage
+- **Location**: Configured in `fly.toml`
+- **Purpose**: Store all user and game data permanently
+
+### **Database Structure:**
+```
+/data/tron.db
+├── oauth_tokens      # Zoom API access tokens (permanent)
+├── paid_hosts       # Payment records & ownership (permanent)
+├── user_sessions    # Authentication sessions (24hr auto-cleanup)
+└── game_data       # Game history and stats (permanent)
+```
+
+### **Data Security:**
+- ✅ **All user data stored on your volume**
+- ✅ **No customer data in third-party services**
+- ✅ **Automatic session cleanup** (prevents bloat)
+- ✅ **Permanent ownership records** (payment proof)
+
+### **Volume Benefits:**
+- **Persistent across deployments** - Data survives updates
+- **Secure storage** - Encrypted on Fly.io infrastructure  
+- **1GB capacity** - Sufficient for user base
+- **Automatic backups** - Fly.io handles redundancy
+
+### **Volume Management Commands:**
+
+#### **Check Volume Status:**
+```bash
+# List all volumes
+flyctl volumes
+
+# Check your specific volume
+flyctl volumes list | grep vol_45lddq5d6wp76zqr
+
+# Show volume details
+flyctl volumes show vol_45lddq5d6wp76zqr
+```
+
+#### **Access Volume Data:**
+```bash
+# SSH into your app machine
+flyctl ssh console
+
+# Browse database (SQLite)
+flyctl ssh console --command "sqlite3 /data/tron.db"
+
+# List database tables
+flyctl ssh console --command "sqlite3 /data/tron.db '.tables'"
+
+# Query user data
+flyctl ssh console --command "sqlite3 /data/tron.db 'SELECT * FROM paid_hosts LIMIT 5;'"
+
+# Query sessions
+flyctl ssh console --command "sqlite3 /data/tron.db 'SELECT * FROM user_sessions WHERE expires_at > datetime(\"now\");'"
+```
+
+#### **Database Query Examples:**
+```sql
+-- Check paid users
+SELECT zoom_user_id, paid_at FROM paid_hosts ORDER BY paid_at DESC;
+
+-- Check active sessions
+SELECT session_id, zoom_user_id, expires_at FROM user_sessions 
+WHERE expires_at > datetime('now');
+
+-- Check OAuth tokens
+SELECT zoom_user_id, created_at FROM oauth_tokens 
+WHERE expires_at > datetime('now');
+
+-- Cleanup expired sessions
+DELETE FROM user_sessions WHERE expires_at <= datetime('now');
+
+-- Database statistics
+SELECT 
+  (SELECT COUNT(*) FROM oauth_tokens) as active_tokens,
+  (SELECT COUNT(*) FROM paid_hosts) as paid_users,
+  (SELECT COUNT(*) FROM user_sessions WHERE expires_at > datetime('now')) as active_sessions;
+```
+
+#### **Backup Volume Data:**
+```bash
+# Copy database locally
+flyctl ssh console --command "cp /data/tron.db /tmp/tron_backup.db"
+flyctl sftp get /tmp/tron_backup.db ./tron_backup.db
+
+# Export specific tables
+flyctl ssh console --command "sqlite3 /data/tron.db '.dump paid_hosts' > paid_hosts_backup.sql"
+```
+
+#### **Volume Maintenance:**
+```bash
+# Check volume usage
+flyctl ssh console --command "df -h /data"
+
+# Optimize database
+flyctl ssh console --command "sqlite3 /data/tron.db 'VACUUM;'"
+
+# Check database integrity
+flyctl ssh console --command "sqlite3 /data/tron.db 'PRAGMA integrity_check;'"
+```
+
 ## Installation
 
 1. **Install Node.js 18+** (if not already installed)
