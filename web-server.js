@@ -1105,10 +1105,15 @@ function handleOAuthRoutes(req, res) {
         if (sessionId) {
             const session = validateSession(sessionId);
             if (session) {
+                // Check if user has paid
+                const paidStmt = db.prepare('SELECT zoom_user_id FROM paid_hosts WHERE zoom_user_id = ?');
+                const paidRecord = paidStmt.get(session.zoom_user_id);
+                const hasPaid = !!paidRecord;
+                
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ 
                     authenticated: true, 
-                    paid: false, // Will be determined by separate check
+                    paid: hasPaid,
                     user: {
                         id: session.zoom_user_id,
                         email: session.user_email,
@@ -1201,7 +1206,7 @@ function handleOAuthRoutes(req, res) {
                     discounts: [], // Allow promo codes
                     allow_promotion_codes: true, // Enable promo code field
                     tax_id_collection: { enabled: true }, // Show tax breakdown - Canadian digital goods tax ID
-                    metadata: {} // NO USER DATA - Stripe processes payments only
+                    metadata: { zoom_user_id: zoomUserId } // Store user ID for payment verification
                 });
                 
                 console.log('Stripe session created:', session.id);
@@ -1237,8 +1242,22 @@ function handleOAuthRoutes(req, res) {
                         
                         console.log(`User ${session.metadata.zoom_user_id} successfully paid for access`);
                         
-                        // Redirect to game with paid status
-                        res.writeHead(302, { 'Location': `/?auth=success&paid=true` });
+                        // Find user session and redirect with session ID (no user data in URL)
+                        const userSessionStmt = db.prepare(`
+                            SELECT session_id 
+                            FROM user_sessions 
+                            WHERE zoom_user_id = ? 
+                            ORDER BY created_at DESC 
+                            LIMIT 1
+                        `);
+                        const userSession = userSessionStmt.get(session.metadata.zoom_user_id);
+                        
+                        if (userSession) {
+                            res.writeHead(302, { 'Location': `/?auth=success&paid=true&session=${userSession.session_id}` });
+                        } else {
+                            // Fallback without session
+                            res.writeHead(302, { 'Location': `/?auth=success&paid=true` });
+                        }
                         res.end();
                         return;
                     }
@@ -1376,290 +1395,290 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server: httpServer, path: '/ws' });
 
-let gameState = null;
-let clients = {};
-let lobbyReady = {};
-let numPlayers = 2;
-let gameMode = 'time';
-let timeLimit = 300;
-let maxLives = 5;
-let gameInterval = null;
-let previousState = null;
-let useBinaryProtocol = true;
+class GameRoom {
+    constructor(roomId) {
+        this.roomId = roomId;
+        this.gameState = null;
+        this.clients = {}; // playerId -> ws
+        this.lobbyReady = {}; // playerId -> boolean
+        this.playerSessions = {}; // sessionId -> playerId
+        this.numPlayers = 2;
+        this.gameMode = 'time';
+        this.timeLimit = 300;
+        this.maxLives = 5;
+        this.gameInterval = null;
+        this.previousState = null;
+        this.useBinaryProtocol = true;
+    }
+
+    broadcastLobbyUpdate() {
+        const lobbyData = {
+            type: 'lobby_update',
+            players: Object.keys(this.clients).length,
+            max_players: this.numPlayers,
+            ready_count: Object.values(this.lobbyReady).filter(r => r).length,
+            game_mode: this.gameMode
+        };
+        this.broadcast(lobbyData);
+    }
+
+    startGame() {
+        if (this.gameState) {
+            this.gameState.startGame();
+            this.gameInterval = setInterval(() => {
+                if (!this.gameState) {
+                    clearInterval(this.gameInterval);
+                    return;
+                }
+                this.gameState.update();
+                this.broadcast({
+                    type: 'game_update',
+                    state: this.gameState.toJSON()
+                });
+
+                if (this.gameState.gameOver) {
+                    console.log(`[Room ${this.roomId}] Game over! Winner: ${this.gameState.winner ? this.gameState.winner.name : 'None'}`);
+                    clearInterval(this.gameInterval);
+                    this.gameInterval = null;
+                    this.gameState = null;
+                }
+            }, 1000 / 15);
+        }
+    }
+
+    computeDelta(current, previous) {
+        if (!previous) return current;
+        const delta = { type: current.type };
+        if (current.type === 'game_update' && previous.type === 'game_update') {
+            delta.state = {};
+            const currState = current.state;
+            const prevState = previous.state;
+            if (currState.gameStarted !== prevState.gameStarted) delta.state.gameStarted = currState.gameStarted;
+            if (currState.gameOver !== prevState.gameOver) delta.state.gameOver = currState.gameOver;
+            if (currState.timeRemaining !== prevState.timeRemaining) delta.state.timeRemaining = currState.timeRemaining;
+            if (currState.gridWidth !== prevState.gridWidth) delta.state.gridWidth = currState.gridWidth;
+            if (currState.gridHeight !== prevState.gridHeight) delta.state.gridHeight = currState.gridHeight;
+            if (!delta.state.gridWidth) delta.state.gridWidth = currState.gridWidth;
+            if (!delta.state.gridHeight) delta.state.gridHeight = currState.gridHeight;
+            if (typeof objectEquals !== 'undefined') {
+                if (!objectEquals(currState.powerUp, prevState.powerUp)) delta.state.powerUp = currState.powerUp;
+                if (!objectEquals(currState.walls, prevState.walls)) delta.state.walls = currState.walls;
+                if (!objectEquals(currState.winner, prevState.winner)) delta.state.winner = currState.winner;
+            } else {
+                delta.state.powerUp = currState.powerUp;
+                delta.state.walls = currState.walls;
+                delta.state.winner = currState.winner;
+            }
+            delta.state.cycles = {};
+            for (const [id, cycle] of Object.entries(currState.cycles)) {
+                const prevCycle = prevState.cycles[id];
+                if (!prevCycle) {
+                    delta.state.cycles[id] = cycle;
+                } else {
+                    const cycleDelta = {
+                        playerId: id, name: cycle.name, color: cycle.color,
+                        lives: cycle.lives, deaths: cycle.deaths, score: cycle.score
+                    };
+                    if (cycle.x !== prevCycle.x) cycleDelta.x = cycle.x;
+                    if (cycle.y !== prevCycle.y) cycleDelta.y = cycle.y;
+                    if (cycle.direction !== prevCycle.direction) cycleDelta.direction = cycle.direction;
+                    if (cycle.alive !== prevCycle.alive) cycleDelta.alive = cycle.alive;
+                    if (cycle.speedBoost !== prevCycle.speedBoost) cycleDelta.speedBoost = cycle.speedBoost;
+                    if (cycle.fading !== prevCycle.fading) cycleDelta.fading = cycle.fading;
+                    if (cycle.deathTimestamp !== prevCycle.deathTimestamp) cycleDelta.deathTimestamp = cycle.deathTimestamp;
+                    if (typeof arrayEquals !== 'undefined') {
+                        if (!arrayEquals(cycle.trail, prevCycle.trail)) cycleDelta.trail = cycle.trail;
+                        if (!arrayEquals(cycle.disconnectedTrails, prevCycle.disconnectedTrails)) cycleDelta.disconnectedTrails = cycle.disconnectedTrails;
+                    } else {
+                        cycleDelta.trail = cycle.trail;
+                        cycleDelta.disconnectedTrails = cycle.disconnectedTrails;
+                    }
+                    if (typeof objectEquals !== 'undefined') {
+                        if (!objectEquals(cycle.disc, prevCycle.disc)) cycleDelta.disc = cycle.disc;
+                    } else {
+                        cycleDelta.disc = cycle.disc;
+                    }
+                    if (cycle.discCooldown !== prevCycle.discCooldown) cycleDelta.discCooldown = cycle.discCooldown;
+                    delta.state.cycles[id] = cycleDelta;
+                }
+            }
+            if (Object.keys(delta.state).length === 0 || Object.keys(delta.state.cycles || {}).length === 0) return null;
+        }
+        return delta;
+    }
+
+    broadcast(data) {
+        let messageToSend = data;
+        if (data.type === 'game_update') {
+            const delta = this.computeDelta(data, this.previousState);
+            if (!delta) return;
+            messageToSend = delta;
+            this.previousState = JSON.parse(JSON.stringify(data));
+        }
+        let message;
+        if (this.useBinaryProtocol && data.type === 'game_update') {
+            message = msgpack.encode(messageToSend);
+        } else {
+            message = JSON.stringify(messageToSend);
+        }
+        for (const ws of Object.values(this.clients)) {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(message);
+            }
+        }
+    }
+}
+
+const activeRooms = new Map();
+
+function getRoom(roomId) {
+    if (!activeRooms.has(roomId)) {
+        activeRooms.set(roomId, new GameRoom(roomId));
+        console.log(`[SERVER] Created new room: ${roomId}`);
+    }
+    return activeRooms.get(roomId);
+}
 
 wss.on('connection', (ws) => {
-    console.log('New client connected');
+    ws.roomId = null;
+    ws.playerId = null;
 
     ws.on('message', (message) => {
         let data;
-        try {
-            data = JSON.parse(message);
-        } catch (error) {
-            console.error('[SERVER] Invalid JSON received:', error.message);
-            return;
-        }
+        try { data = JSON.parse(message); } catch (e) { return; }
 
         if (data.type === 'join') {
-            const sanitizedName = String(data.name || 'Player').substring(0, 15).replace(/[<>]/g, '');
-            
-            if (!gameState) {
-                gameState = new GameState(numPlayers, gameMode, timeLimit, maxLives);
-                console.log(`[SERVER] Created new game state for ${numPlayers} players, ${maxLives} lives`);
-            }
-            
-            const playerId = `player_${Object.keys(gameState.cycles).length}`;
+            const roomId = data.roomId || 'dev_room';
+            const sessionId = data.sessionId || null;
+            ws.roomId = roomId;
+            const room = getRoom(roomId);
 
-            if (gameState.addPlayer(playerId, sanitizedName)) {
-                clients[playerId] = ws;
-                ws.playerId = playerId;
-                lobbyReady[playerId] = false;
-
-                const isHost = playerId === 'player_0';
+            if (sessionId && room.playerSessions[sessionId]) {
+                const oldPlayerId = room.playerSessions[sessionId];
+                if (room.clients[oldPlayerId] && room.clients[oldPlayerId] !== ws) {
+                    room.clients[oldPlayerId].close();
+                }
                 
-                ws.send(JSON.stringify({
-                    type: 'join_success',
-                    playerId: playerId,
-                    isHost: isHost,
-                    numPlayers: numPlayers,
-                    gameMode: gameMode,
-                    timeLimit: timeLimit,
-                    maxLives: maxLives
-                }));
-
-                console.log(`[SERVER] ${sanitizedName} joined as ${playerId} (${Object.keys(clients).length}/${numPlayers})`);
-                console.log(`[SERVER] Total players in game state: ${Object.keys(gameState.cycles).length}`);
-                broadcastLobbyUpdate();
-            } else {
-                ws.send(JSON.stringify({ type: 'join_failed', reason: 'Game full' }));
-                ws.close();
+                room.clients[oldPlayerId] = ws;
+                ws.playerId = oldPlayerId;
+                
+                const isHost = oldPlayerId === 'player_0';
+                
+                if (room.gameState && room.gameState.gameStarted) {
+                    ws.send(JSON.stringify({ type: 'reconnected', isHost: isHost, playerId: oldPlayerId }));
+                    console.log(`[SERVER] Player ${oldPlayerId} seamlessly reconnected to room ${roomId}`);
+                    return;
+                }
             }
-        } else if (data.type === 'ready') {
-            lobbyReady[ws.playerId] = true;
-            console.log(`${ws.playerId} is ready`);
-            broadcastLobbyUpdate();
 
-            if (Object.values(lobbyReady).every(r => r) && Object.keys(lobbyReady).length === numPlayers) {
-                console.log('All players ready! Starting game...');
-                startGame();
+            const sanitizedName = String(data.name || 'Player').substring(0, 15).replace(/[<>]/g, '');
+            if (!room.gameState) {
+                room.gameState = new GameState(room.numPlayers, room.gameMode, room.timeLimit, room.maxLives);
+            }
+            
+            if (!ws.playerId) {
+                const playerId = `player_${Object.keys(room.gameState.cycles).length}`;
+                if (room.gameState.addPlayer(playerId, sanitizedName)) {
+                    room.clients[playerId] = ws;
+                    ws.playerId = playerId;
+                    room.lobbyReady[playerId] = false;
+                    
+                    if (sessionId) room.playerSessions[sessionId] = playerId;
+                } else {
+                    ws.send(JSON.stringify({ type: 'join_failed', reason: 'Game full' }));
+                    ws.close();
+                    return;
+                }
+            }
+
+            const isHost = ws.playerId === 'player_0';
+            ws.send(JSON.stringify({
+                type: 'join_success', playerId: ws.playerId, isHost: isHost,
+                numPlayers: room.numPlayers, gameMode: room.gameMode,
+                timeLimit: room.timeLimit, maxLives: room.maxLives
+            }));
+
+            room.broadcastLobbyUpdate();
+            
+        } else if (data.type === 'ready') {
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            room.lobbyReady[ws.playerId] = true;
+            room.broadcastLobbyUpdate();
+
+            if (Object.values(room.lobbyReady).every(r => r) && Object.keys(room.lobbyReady).length === room.numPlayers) {
+                room.startGame();
             }
         } else if (data.type === 'input') {
-            if (gameState && gameState.gameStarted && ws.playerId in gameState.cycles) {
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            if (room.gameState && room.gameState.gameStarted && ws.playerId in room.gameState.cycles) {
                 const validDirections = ['UP', 'DOWN', 'LEFT', 'RIGHT'];
                 if (validDirections.includes(data.direction)) {
-                    gameState.cycles[ws.playerId].changeDirection(data.direction);
+                    room.gameState.cycles[ws.playerId].changeDirection(data.direction);
                 }
             }
         } else if (data.type === 'disconnect_trail') {
-            if (gameState && gameState.gameStarted && ws.playerId in gameState.cycles) {
-                gameState.cycles[ws.playerId].disconnectTrail();
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            if (room.gameState && room.gameState.gameStarted && ws.playerId in room.gameState.cycles) {
+                room.gameState.cycles[ws.playerId].disconnectTrail();
             }
         } else if (data.type === 'hold_disc') {
-            if (gameState && gameState.gameStarted && ws.playerId in gameState.cycles) {
-                gameState.cycles[ws.playerId].holdDisc();
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            if (room.gameState && room.gameState.gameStarted && ws.playerId in room.gameState.cycles) {
+                room.gameState.cycles[ws.playerId].holdDisc();
             }
         } else if (data.type === 'release_disc') {
-            if (gameState && gameState.gameStarted && ws.playerId in gameState.cycles) {
-                gameState.cycles[ws.playerId].releaseDisc();
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            if (room.gameState && room.gameState.gameStarted && ws.playerId in room.gameState.cycles) {
+                room.gameState.cycles[ws.playerId].releaseDisc();
             }
         } else if (data.type === 'config') {
-            if (ws.playerId && ws.playerId !== 'player_0') {
-                console.log(`[SERVER] Config rejected - ${ws.playerId} is not host`);
-                return;
-            }
+            if (!ws.roomId || ws.playerId !== 'player_0') return;
+            const room = getRoom(ws.roomId);
             
-            if (!gameState || Object.keys(gameState.cycles).length === 0) {
-                const validNumPlayers = Math.max(2, Math.min(12, parseInt(data.numPlayers) || numPlayers));
-                const validGameMode = ['time', 'lives'].includes(data.gameMode) ? data.gameMode : gameMode;
-                const validTimeLimit = Math.max(60, Math.min(600, parseInt(data.timeLimit) || timeLimit));
-                const validMaxLives = Math.max(1, Math.min(10, parseInt(data.maxLives) || maxLives));
+            if (!room.gameState || Object.keys(room.gameState.cycles).length === 0) {
+                room.numPlayers = Math.max(2, Math.min(12, parseInt(data.numPlayers) || room.numPlayers));
+                room.gameMode = ['time', 'lives'].includes(data.gameMode) ? data.gameMode : room.gameMode;
+                room.timeLimit = Math.max(60, Math.min(600, parseInt(data.timeLimit) || room.timeLimit));
+                room.maxLives = Math.max(1, Math.min(10, parseInt(data.maxLives) || room.maxLives));
                 
-                numPlayers = validNumPlayers;
-                gameMode = validGameMode;
-                timeLimit = validTimeLimit;
-                maxLives = validMaxLives;
-                
-                if (gameState) {
-                    gameState = null;
-                }
-                
-                console.log(`[SERVER] Config received: ${numPlayers} players, ${gameMode} mode, ${maxLives} lives`);
-            } else {
-                console.log(`[SERVER] Config ignored - game has ${Object.keys(gameState.cycles).length} players already`);
+                if (room.gameState) room.gameState = null;
             }
         }
     });
 
     ws.on('close', () => {
-        if (ws.playerId) {
+        if (ws.roomId && ws.playerId) {
+            const room = getRoom(ws.roomId);
             const wasHost = ws.playerId === 'player_0';
             
-            delete clients[ws.playerId];
-            delete lobbyReady[ws.playerId];
-            
-            if (wasHost) {
-                console.log(`[SERVER] Host disconnected - resetting game state`);
-                if (gameInterval) {
-                    clearInterval(gameInterval);
-                    gameInterval = null;
-                }
-                gameState = null;
-                clients = {};
-                lobbyReady = {};
-                Object.values(wss.clients).forEach(client => {
-                    if (client.readyState === 1) {
-                        client.send(JSON.stringify({ type: 'host_disconnected' }));
-                        client.close();
-                    }
-                });
+            if (room.gameState && room.gameState.gameStarted) {
+                delete room.clients[ws.playerId];
             } else {
-                console.log(`${ws.playerId} disconnected`);
-                if (gameState && !gameState.gameStarted) {
-                    gameState.removePlayer(ws.playerId);
+                delete room.clients[ws.playerId];
+                delete room.lobbyReady[ws.playerId];
+                if (room.gameState) room.gameState.removePlayer(ws.playerId);
+                
+                if (wasHost) {
+                    if (room.gameInterval) clearInterval(room.gameInterval);
+                    activeRooms.delete(ws.roomId);
+                    Object.values(room.clients).forEach(client => {
+                        if (client.readyState === 1) {
+                            client.send(JSON.stringify({ type: 'host_disconnected' }));
+                            client.close();
+                        }
+                    });
+                } else {
+                    room.broadcastLobbyUpdate();
                 }
-                broadcastLobbyUpdate();
             }
         }
     });
 });
-
-function broadcastLobbyUpdate() {
-    const lobbyData = {
-        type: 'lobby_update',
-        players: Object.keys(clients).length,
-        max_players: numPlayers,
-        ready_count: Object.values(lobbyReady).filter(r => r).length,
-        game_mode: gameMode
-    };
-    broadcast(lobbyData);
-}
-
-function startGame() {
-    if (gameState) {
-        gameState.startGame();
-        gameInterval = setInterval(() => {
-            if (!gameState) {
-                clearInterval(gameInterval);
-                return;
-            }
-            gameState.update();
-            broadcast({
-                type: 'game_update',
-                state: gameState.toJSON()
-            });
-
-            if (gameState.gameOver) {
-                console.log(`Game over! Winner: ${gameState.winner ? gameState.winner.name : 'None'}`);
-                clearInterval(gameInterval);
-                gameInterval = null;
-                gameState = null;
-            }
-        }, 1000 / 15);
-    }
-}
-
-function computeDelta(current, previous) {
-    if (!previous) return current;
-    
-    const delta = { type: current.type };
-    
-    if (current.type === 'game_update' && previous.type === 'game_update') {
-        delta.state = {};
-        const currState = current.state;
-        const prevState = previous.state;
-        
-        if (currState.gameStarted !== prevState.gameStarted) delta.state.gameStarted = currState.gameStarted;
-        if (currState.gameOver !== prevState.gameOver) delta.state.gameOver = currState.gameOver;
-        if (currState.timeRemaining !== prevState.timeRemaining) delta.state.timeRemaining = currState.timeRemaining;
-        if (currState.gridWidth !== prevState.gridWidth) delta.state.gridWidth = currState.gridWidth;
-        if (currState.gridHeight !== prevState.gridHeight) delta.state.gridHeight = currState.gridHeight;
-        
-        if (!delta.state.gridWidth) delta.state.gridWidth = currState.gridWidth;
-        if (!delta.state.gridHeight) delta.state.gridHeight = currState.gridHeight;
-        
-        if (!objectEquals(currState.powerUp, prevState.powerUp)) {
-            delta.state.powerUp = currState.powerUp;
-        }
-        
-        if (!objectEquals(currState.walls, prevState.walls)) {
-            delta.state.walls = currState.walls;
-        }
-        
-        if (!objectEquals(currState.winner, prevState.winner)) {
-            delta.state.winner = currState.winner;
-        }
-        
-        delta.state.cycles = {};
-        for (const [id, cycle] of Object.entries(currState.cycles)) {
-            const prevCycle = prevState.cycles[id];
-            if (!prevCycle) {
-                delta.state.cycles[id] = cycle;
-            } else {
-                const cycleDelta = {
-                    playerId: id,
-                    name: cycle.name,
-                    color: cycle.color,
-                    lives: cycle.lives,
-                    deaths: cycle.deaths,
-                    score: cycle.score
-                };
-                
-                if (cycle.x !== prevCycle.x) cycleDelta.x = cycle.x;
-                if (cycle.y !== prevCycle.y) cycleDelta.y = cycle.y;
-                if (cycle.direction !== prevCycle.direction) cycleDelta.direction = cycle.direction;
-                if (cycle.alive !== prevCycle.alive) cycleDelta.alive = cycle.alive;
-                if (cycle.speedBoost !== prevCycle.speedBoost) cycleDelta.speedBoost = cycle.speedBoost;
-                if (cycle.fading !== prevCycle.fading) cycleDelta.fading = cycle.fading;
-                if (cycle.deathTimestamp !== prevCycle.deathTimestamp) cycleDelta.deathTimestamp = cycle.deathTimestamp;
-                
-                if (!arrayEquals(cycle.trail, prevCycle.trail)) {
-                    cycleDelta.trail = cycle.trail;
-                }
-                if (!arrayEquals(cycle.disconnectedTrails, prevCycle.disconnectedTrails)) {
-                    cycleDelta.disconnectedTrails = cycle.disconnectedTrails;
-                }
-                
-                if (!objectEquals(cycle.disc, prevCycle.disc)) {
-                    cycleDelta.disc = cycle.disc;
-                }
-                if (cycle.discCooldown !== prevCycle.discCooldown) {
-                    cycleDelta.discCooldown = cycle.discCooldown;
-                }
-                
-                delta.state.cycles[id] = cycleDelta;
-            }
-        }
-        
-        if (Object.keys(delta.state).length === 0 || Object.keys(delta.state.cycles || {}).length === 0) {
-            return null;
-        }
-    }
-    
-    return delta;
-}
-
-function broadcast(data) {
-    let messageToSend = data;
-    
-    if (data.type === 'game_update') {
-        const delta = computeDelta(data, previousState);
-        if (!delta) return;
-        messageToSend = delta;
-        previousState = JSON.parse(JSON.stringify(data));
-    }
-    
-    let message;
-    if (useBinaryProtocol && data.type === 'game_update') {
-        message = msgpack.encode(messageToSend);
-    } else {
-        message = JSON.stringify(messageToSend);
-    }
-    
-    for (const ws of Object.values(clients)) {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(message);
-        }
-    }
-}
 
 httpServer.listen(PORT, () => {
     console.log(`HTTP Server running on http://localhost:${PORT}`);
