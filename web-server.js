@@ -26,14 +26,14 @@ function validateSession(sessionId) {
     const stmt = db.prepare(`
         SELECT zoom_user_id, user_email, user_name 
         FROM user_sessions 
-        WHERE session_id = ? AND expires_at > datetime('now')
+        WHERE session_id = ? AND julianday(expires_at) > julianday('now')
     `);
     return stmt.get(sessionId);
 }
 
 function cleanupExpiredSessions() {
     const stmt = db.prepare(`
-        DELETE FROM user_sessions WHERE expires_at <= datetime('now')
+        DELETE FROM user_sessions WHERE julianday(expires_at) <= julianday('now')
     `);
     stmt.run();
 }
@@ -955,10 +955,8 @@ function handleOAuthRoutes(req, res) {
     // OAuth callback
     if (url.pathname === '/auth/zoom/callback') {
         console.log('OAuth callback received');
-        console.log('Full URL:', req.url);
         
         const code = url.searchParams.get('code');
-        console.log('Authorization code:', code);
         
         if (!code) {
             console.log('No authorization code received');
@@ -999,20 +997,13 @@ function handleOAuthRoutes(req, res) {
                             'Authorization': `Bearer ${tokens.access_token}`
                         }
                     }, (userRes) => {
-                        console.log('User info response status:', userRes.statusCode);
-                        console.log('User info response headers:', userRes.headers);
-                        
                         let userData = '';
                         userRes.on('data', chunk => userData += chunk);
                         userRes.on('end', () => {
-                            console.log('User info response body:', userData);
-                            console.log('Response length:', userData.length);
-                            
                             if (userRes.statusCode !== 200) {
                                 console.error('Zoom API returned non-200 status:', userRes.statusCode);
-                                console.error('Response body:', userData);
                                 res.writeHead(userRes.statusCode, { 'Content-Type': 'text/html' });
-                                res.end(`<h1>Zoom API Error: ${userRes.statusCode}</h1><p>Response: ${userData}</p>`);
+                                res.end('<h1>Could not retrieve your Zoom profile. Try signing in again.</h1>');
                                 return;
                             }
                             
@@ -1026,7 +1017,7 @@ function handleOAuthRoutes(req, res) {
                             
                             // Check if response looks like JSON
                             if (!userData.trim().startsWith('{')) {
-                                console.error('Response does not appear to be JSON:', userData.substring(0, 200));
+                                console.error('Zoom profile response is not a JSON object');
                                 res.writeHead(500, { 'Content-Type': 'text/html' });
                                 res.end('<h1>Error getting user info</h1><p>Invalid response format from Zoom API</p>');
                                 return;
@@ -1037,7 +1028,7 @@ function handleOAuthRoutes(req, res) {
                                 
                                 // Validate required user fields
                                 if (!user || !user.id || !user.email) {
-                                    console.error('Invalid user data structure:', user);
+                                    console.error('Zoom profile is missing required fields');
                                     res.writeHead(500, { 'Content-Type': 'text/html' });
                                     res.end('<h1>Error getting user info</h1><p>Invalid user data received from Zoom API</p>');
                                     return;
@@ -1068,9 +1059,8 @@ function handleOAuthRoutes(req, res) {
                                 res.writeHead(302, { 'Location': redirectUrl });
                                 res.end();
                                 
-                            } catch (error) {
-                                console.error('Error parsing user data:', error);
-                                console.error('User data received:', userData);
+                            } catch {
+                                console.error('Could not process Zoom profile');
                                 res.writeHead(500, { 'Content-Type': 'text/html' });
                                 res.end('<h1>Error getting user info</h1><p>Failed to parse user data from Zoom API</p>');
                             }
@@ -1100,7 +1090,9 @@ function handleOAuthRoutes(req, res) {
     
     // Check auth status with session validation
     if (url.pathname === '/auth/status') {
-        const sessionId = url.searchParams.get('session');
+        const bearer = req.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/i);
+        const sessionId = bearer?.[1] || url.searchParams.get('session');
+        res.setHeader('Cache-Control', 'no-store');
         
         if (sessionId) {
             const session = validateSession(sessionId);
@@ -1350,34 +1342,72 @@ function handleOAuthRoutes(req, res) {
     return false;
 }
 
+const publicFiles = new Map([
+    ['index.html', 'text/html; charset=utf-8'],
+    ['privacy.html', 'text/html; charset=utf-8'],
+    ['tos.html', 'text/html; charset=utf-8'],
+    ['quickstart.html', 'text/html; charset=utf-8'],
+    ['support.html', 'text/html; charset=utf-8'],
+    ['return.html', 'text/html; charset=utf-8'],
+    ['Tron sample.gif', 'image/gif'],
+    ['bike.png', 'image/png'],
+    ['disk.png', 'image/png'],
+    ['Enter The Grid.mp3', 'audio/mpeg'],
+    ['Enter The Grid-2.mp3', 'audio/mpeg'],
+    ['Crashing.mp3', 'audio/mpeg']
+]);
+
+function serveHtml(res, content, host) {
+    const nonce = crypto.randomBytes(18).toString('base64');
+    const connectSources = ["'self'", 'https://api.stripe.com', 'https://r.stripe.com'];
+    if (/^[a-z0-9.\-:[\]]+$/i.test(host)) {
+        connectSources.push(`ws://${host}`, `wss://${host}`);
+    }
+    res.setHeader('Content-Security-Policy', [
+        "default-src 'self'",
+        "base-uri 'none'",
+        "object-src 'none'",
+        `script-src 'self' 'nonce-${nonce}' https://appssdk.zoom.us https://cdn.jsdelivr.net https://js.stripe.com`,
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "frame-src https://js.stripe.com https://hooks.stripe.com",
+        `connect-src ${connectSources.join(' ')}`
+    ].join('; '));
+    return content.toString('utf8').replace('<script nonce="{{CSP_NONCE}}">', `<script nonce="${nonce}">`);
+}
+
 const httpServer = http.createServer((req, res) => {
-    console.log('Request received for:', req.url);
-    
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+
     // Handle OAuth routes first
     if (handleOAuthRoutes(req, res)) {
         return;
     }
     
     const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
-    let filePath = parsedUrl.pathname === '/' ? '/index.html' : decodeURIComponent(parsedUrl.pathname);
-    filePath = path.join(__dirname, filePath);
+    let filename;
+    try {
+        filename = parsedUrl.pathname === '/' ? 'index.html' : decodeURIComponent(parsedUrl.pathname.slice(1));
+    } catch {
+        res.writeHead(400);
+        res.end('Bad request');
+        return;
+    }
+    const contentType = publicFiles.get(filename);
+    if (!contentType) {
+        res.writeHead(404);
+        res.end('404 Not Found');
+        return;
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { Allow: 'GET, HEAD' });
+        res.end('Method not allowed');
+        return;
+    }
 
-    const extname = path.extname(filePath);
-    const contentTypes = {
-        '.html': 'text/html',
-        '.js': 'text/javascript',
-        '.css': 'text/css',
-        '.json': 'application/json',
-        '.png': 'image/png',
-        '.jpg': 'image/jpg',
-        '.gif': 'image/gif',
-        '.svg': 'image/svg+xml',
-        '.mp3': 'audio/mpeg'
-    };
-
-    const contentType = contentTypes[extname] || 'application/octet-stream';
-
-    fs.readFile(filePath, (error, content) => {
+    fs.readFile(path.join(__dirname, filename), (error, content) => {
         if (error) {
             if (error.code === 'ENOENT') {
                 res.writeHead(404);
@@ -1386,10 +1416,11 @@ const httpServer = http.createServer((req, res) => {
                 res.writeHead(500);
                 res.end('Server Error: ' + error.code);
             }
-        } else {
-            res.writeHead(200, { 'Content-Type': contentType });
-            res.end(content, 'utf-8');
+            return;
         }
+        const body = contentType.startsWith('text/html') ? serveHtml(res, content, parsedUrl.host) : content;
+        res.writeHead(200, { 'Content-Type': contentType });
+        res.end(req.method === 'HEAD' ? undefined : body);
     });
 });
 
@@ -1409,6 +1440,21 @@ class GameRoom {
         this.gameInterval = null;
         this.previousState = null;
         this.useBinaryProtocol = true;
+    }
+
+    configure(settings) {
+        const readInteger = (value, fallback, min, max) => {
+            if (typeof value !== 'number' && typeof value !== 'string') return fallback;
+            const number = Number.parseInt(value, 10);
+            return Number.isNaN(number) ? fallback : Math.max(min, Math.min(max, number));
+        };
+
+        this.numPlayers = readInteger(settings.numPlayers, this.numPlayers, 2, 12);
+        this.timeLimit = readInteger(settings.timeLimit, this.timeLimit, 60, 600);
+        this.maxLives = readInteger(settings.maxLives, this.maxLives, 1, 10);
+        if (settings.gameMode === 'time' || settings.gameMode === 'lives') {
+            this.gameMode = settings.gameMode;
+        }
     }
 
     broadcastLobbyUpdate() {
@@ -1546,6 +1592,7 @@ wss.on('connection', (ws) => {
     ws.on('message', (message) => {
         let data;
         try { data = JSON.parse(message); } catch (e) { return; }
+        if (!data || typeof data !== 'object') return;
 
         if (data.type === 'join') {
             const roomId = data.roomId || 'dev_room';
@@ -1573,6 +1620,9 @@ wss.on('connection', (ws) => {
 
             const sanitizedName = String(data.name || 'Player').substring(0, 15).replace(/[<>]/g, '');
             if (!room.gameState) {
+                if (data.settings && typeof data.settings === 'object') {
+                    room.configure(data.settings);
+                }
                 room.gameState = new GameState(room.numPlayers, room.gameMode, room.timeLimit, room.maxLives);
             }
             
@@ -1641,11 +1691,7 @@ wss.on('connection', (ws) => {
             const room = getRoom(ws.roomId);
             
             if (!room.gameState || Object.keys(room.gameState.cycles).length === 0) {
-                room.numPlayers = Math.max(2, Math.min(12, parseInt(data.numPlayers) || room.numPlayers));
-                room.gameMode = ['time', 'lives'].includes(data.gameMode) ? data.gameMode : room.gameMode;
-                room.timeLimit = Math.max(60, Math.min(600, parseInt(data.timeLimit) || room.timeLimit));
-                room.maxLives = Math.max(1, Math.min(10, parseInt(data.maxLives) || room.maxLives));
-                
+                room.configure(data);
                 if (room.gameState) room.gameState = null;
             }
         }

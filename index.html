@@ -384,10 +384,10 @@
 
     <!-- Audio Controls (shown on game screen) -->
     <div id="audioControls">
-        <button id="audioControl" onclick="toggleAudio()">&#x1F508; SOUND ON</button>
+        <button id="audioControl">&#x1F508; SOUND ON</button>
         <div class="volume-control">
             <label>&#x1F50A;</label>
-            <input type="range" id="volumeSlider" min="0" max="100" value="100" oninput="updateVolume(this.value)">
+            <input type="range" id="volumeSlider" min="0" max="100" value="100">
             <span id="volumeValue">100%</span>
         </div>
     </div>
@@ -410,7 +410,7 @@
                     <p style="color: #ff6666;">Login required to play</p>
                 </div>
 
-                <button id="zoomLoginBtn" class="zoom-login-btn" onclick="loginWithZoom()">
+                <button id="zoomLoginBtn" class="zoom-login-btn">
                     LOGIN WITH ZOOM
                 </button>
             </div>
@@ -459,14 +459,14 @@
                     <p><strong>Disc Mechanic:</strong> HOLD E to hold disc at your side, RELEASE to throw. Disc kills on contact!</p>
                 </div>
 
-                <button onclick="connectToGame()">JOIN GAME</button>
+                <button id="joinGameBtn">JOIN GAME</button>
             </div>
 
             <div id="lobby">
                 <div class="info-text" id="lobbyPlayers">Waiting for players...</div>
                 <div class="info-text" id="lobbyReady">Ready: 0/2</div>
                 <div class="info-text" id="lobbyMode">Mode: TIME</div>
-                <button onclick="sendReady()">READY</button>
+                <button id="readyBtn">READY</button>
             </div>
 
             <div id="game-container">
@@ -477,7 +477,7 @@
 
             <div id="game-over">
                 <div class="winner-announcement" id="winnerText"></div>
-                <button onclick="location.reload()">PLAY AGAIN</button>
+                <button id="playAgainBtn">PLAY AGAIN</button>
             </div>
         </div>
     </div>
@@ -493,7 +493,7 @@
         <source src="Crashing.mp3" type="audio/mpeg">
     </audio>
 
-    <script>
+    <script nonce="{{CSP_NONCE}}">
         // ===== AUTH & PAYMENT (from Zoom integration) =====
         let isAuthenticated = false;
         let hasPaid = false;
@@ -532,7 +532,7 @@
             }
         }
 
-        function checkAuthStatus() {
+        async function checkAuthStatus() {
             const urlParams = new URLSearchParams(window.location.search);
             const sessionId = urlParams.get('session');
 
@@ -541,46 +541,41 @@
 
             if (sessionId) {
                 localStorage.setItem('tronSessionId', sessionId);
-                console.log('Checking session with server...');
-                fetch(`/auth/status?session=${sessionId}`)
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log('Session validation response:', data);
-                        if (data.authenticated) {
-                            isAuthenticated = true;
-                            currentUser = data.user;
-                            hasPaid = data.paid;
-                        } else {
-                            isAuthenticated = false;
-                            currentUser = null;
-                            hasPaid = false;
-                        }
-                        updateAuthUI();
-                    })
-                    .catch(error => {
-                        console.error('Error checking auth status:', error);
-                        isAuthenticated = false;
-                        currentUser = null;
-                        updateAuthUI();
-                    });
-            } else {
-                // Check URL params (backward compat / dev mode)
-                const auth = urlParams.get('auth');
-                const paid = urlParams.get('paid');
-                const dev = urlParams.get('dev');
-
-                if (dev === 'true') {
-                    isDevMode = true;
-                    isAuthenticated = true;
-                    hasPaid = true;
-                    currentUser = { id: 'dev_user', email: 'dev@test.com', name: 'Developer' };
-                } else if (auth === 'success') {
-                    isAuthenticated = true;
-                    hasPaid = paid === 'true';
-                    currentUser = { id: 'user_' + Date.now(), email: 'user@example.com', name: 'Player' };
-                }
-                updateAuthUI();
+                urlParams.delete('session');
+                urlParams.delete('auth');
+                urlParams.delete('paid');
+                const remainingQuery = urlParams.toString();
+                const cleanPath = window.location.pathname + (remainingQuery ? '?' + remainingQuery : '');
+                window.history.replaceState(null, '', cleanPath + window.location.hash);
             }
+
+            if (currentUserSessionId) {
+                try {
+                    const response = await fetch('/auth/status', {
+                        headers: { Authorization: 'Bearer ' + currentUserSessionId }
+                    });
+                    if (!response.ok) throw new Error('Could not check your session');
+                    const data = await response.json();
+                    isAuthenticated = data.authenticated;
+                    currentUser = isAuthenticated ? data.user : null;
+                    hasPaid = isAuthenticated && data.paid;
+                    if (!isAuthenticated) {
+                        localStorage.removeItem('tronSessionId');
+                        currentUserSessionId = null;
+                    }
+                } catch (error) {
+                    console.error('Error checking auth status:', error);
+                    isAuthenticated = false;
+                    currentUser = null;
+                    hasPaid = false;
+                }
+            } else if (urlParams.get('dev') === 'true') {
+                isDevMode = true;
+                isAuthenticated = true;
+                hasPaid = true;
+                currentUser = { id: 'dev_user', email: 'dev@test.com', name: 'Developer' };
+            }
+            updateAuthUI();
         }
 
         function updateAuthUI() {
@@ -786,21 +781,12 @@
                 const timeLimit = parseInt(document.getElementById('timeLimit').value);
                 const maxLives = parseInt(document.getElementById('maxLives').value);
 
-                // Send config first (host only)
-                ws.send(JSON.stringify({
-                    type: 'config',
-                    numPlayers: numPlayers,
-                    gameMode: gameMode,
-                    timeLimit: timeLimit,
-                    maxLives: maxLives
-                }));
-
-                // Then join
                 ws.send(JSON.stringify({
                     type: 'join',
                     name: playerName,
                     roomId: currentRoomId,
-                    sessionId: currentUserSessionId
+                    sessionId: currentUserSessionId,
+                    settings: { numPlayers, gameMode, timeLimit, maxLives }
                 }));
             };
 
@@ -1262,6 +1248,12 @@
         requestAnimationFrame(gameLoop);
 
         // ===== INIT =====
+        document.getElementById('audioControl').addEventListener('click', toggleAudio);
+        document.getElementById('volumeSlider').addEventListener('input', event => updateVolume(event.target.value));
+        document.getElementById('zoomLoginBtn').onclick = loginWithZoom;
+        document.getElementById('joinGameBtn').addEventListener('click', connectToGame);
+        document.getElementById('readyBtn').addEventListener('click', sendReady);
+        document.getElementById('playAgainBtn').addEventListener('click', () => location.reload());
         checkAuthStatus();
     </script>
 </body>

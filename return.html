@@ -68,7 +68,7 @@
         <a href="/" class="btn" id="returnBtn" style="display: none;">Return to Game</a>
     </div>
 
-    <script>
+    <script nonce="{{CSP_NONCE}}">
         const urlParams = new URLSearchParams(window.location.search);
         const sessionId = urlParams.get('session_id');
         
