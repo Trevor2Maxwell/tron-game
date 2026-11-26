@@ -3,6 +3,68 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const msgpack = require('msgpack-lite');
+const Database = require('better-sqlite3');
+const stripe = require('stripe')(process.env.STRIPE_API_SECRET);
+const crypto = require('crypto');
+require('dotenv').config();
+
+// Session management functions
+function createSession(userId, email, name) {
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    
+    const stmt = db.prepare(`
+        INSERT INTO user_sessions (session_id, zoom_user_id, user_email, user_name, expires_at)
+        VALUES (?, ?, ?, ?, ?)
+    `);
+    stmt.run(sessionId, userId, email, name, expiresAt.toISOString());
+    
+    return sessionId;
+}
+
+function validateSession(sessionId) {
+    const stmt = db.prepare(`
+        SELECT zoom_user_id, user_email, user_name 
+        FROM user_sessions 
+        WHERE session_id = ? AND julianday(expires_at) > julianday('now')
+    `);
+    return stmt.get(sessionId);
+}
+
+function cleanupExpiredSessions() {
+    const stmt = db.prepare(`
+        DELETE FROM user_sessions WHERE julianday(expires_at) <= julianday('now')
+    `);
+    stmt.run();
+}
+
+// Initialize persistent database
+const db = new Database('/data/tron.db');
+
+// Create tables on first run
+db.exec(`
+  CREATE TABLE IF NOT EXISTS paid_hosts (
+    zoom_user_id TEXT PRIMARY KEY,
+    paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS user_sessions (
+    session_id TEXT PRIMARY KEY,
+    zoom_user_id TEXT NOT NULL,
+    user_email TEXT,
+    user_name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS oauth_tokens (
+    zoom_user_id TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
 
 // Efficient comparison functions - avoid expensive JSON.stringify
 function arrayEquals(a, b) {
@@ -858,26 +920,494 @@ class GameState {
     }
 }
 
+// Zoom OAuth Configuration
+const ZOOM_CONFIG = {
+    clientId: process.env.ZOOM_CLIENT_ID || 'YOUR_CLIENT_ID_HERE',
+    clientSecret: process.env.ZOOM_CLIENT_SECRET || 'YOUR_CLIENT_SECRET_HERE',
+    redirectUri: 'https://tron-game-zoom.fly.dev/auth/zoom/callback',
+    authUrl: 'https://zoom.us/oauth/authorize',
+    tokenUrl: 'https://zoom.us/oauth/token'
+};
+
+// OAuth endpoints
+function handleOAuthRoutes(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    console.log('OAuth handler called for:', url.pathname);
+    
+    // Start OAuth flow
+    if (url.pathname === '/auth/zoom') {
+        console.log('OAuth request received');
+        console.log('Client ID:', ZOOM_CONFIG.clientId);
+        
+        if (ZOOM_CONFIG.clientId === 'YOUR_CLIENT_ID_HERE') {
+            res.writeHead(500, { 'Content-Type': 'text/html' });
+            res.end('<h1>OAuth not configured - Client ID not set</h1>');
+            return true;
+        }
+        
+        const authUrl = `${ZOOM_CONFIG.authUrl}?response_type=code&client_id=${ZOOM_CONFIG.clientId}&redirect_uri=${ZOOM_CONFIG.redirectUri}`;
+        console.log('Redirecting to:', authUrl);
+        res.writeHead(302, { 'Location': authUrl });
+        res.end();
+        return true;
+    }
+    
+    // OAuth callback
+    if (url.pathname === '/auth/zoom/callback') {
+        console.log('OAuth callback received');
+        
+        const code = url.searchParams.get('code');
+        
+        if (!code) {
+            console.log('No authorization code received');
+            res.writeHead(400, { 'Content-Type': 'text/html' });
+            res.end('<h1>Authorization failed - no code provided</h1>');
+            return true;
+        }
+        
+        // Exchange code for tokens
+        const tokenData = new URLSearchParams();
+        tokenData.append('code', code);
+        tokenData.append('redirect_uri', ZOOM_CONFIG.redirectUri);
+        tokenData.append('grant_type', 'authorization_code');
+        
+        const tokenRequest = require('https').request({
+            hostname: 'zoom.us',
+            path: '/oauth/token',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': `Basic ${Buffer.from(`${ZOOM_CONFIG.clientId}:${ZOOM_CONFIG.clientSecret}`).toString('base64')}`
+            }
+        }, (tokenRes) => {
+            let data = '';
+            tokenRes.on('data', chunk => data += chunk);
+            tokenRes.on('end', () => {
+                try {
+                    const tokens = JSON.parse(data);
+                    
+                    // Get user info
+                    console.log('Making user info request to Zoom API...');
+                    
+                    const userInfoReq = require('https').request({
+                        hostname: 'api.zoom.us',
+                        path: '/v2/users/me',
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${tokens.access_token}`
+                        }
+                    }, (userRes) => {
+                        let userData = '';
+                        userRes.on('data', chunk => userData += chunk);
+                        userRes.on('end', () => {
+                            if (userRes.statusCode !== 200) {
+                                console.error('Zoom API returned non-200 status:', userRes.statusCode);
+                                res.writeHead(userRes.statusCode, { 'Content-Type': 'text/html' });
+                                res.end('<h1>Could not retrieve your Zoom profile. Try signing in again.</h1>');
+                                return;
+                            }
+                            
+                            // Validate response data before parsing
+                            if (!userData || userData.trim().length === 0) {
+                                console.error('Empty response from Zoom API');
+                                res.writeHead(500, { 'Content-Type': 'text/html' });
+                                res.end('<h1>Error getting user info</h1><p>Empty response from Zoom API</p>');
+                                return;
+                            }
+                            
+                            // Check if response looks like JSON
+                            if (!userData.trim().startsWith('{')) {
+                                console.error('Zoom profile response is not a JSON object');
+                                res.writeHead(500, { 'Content-Type': 'text/html' });
+                                res.end('<h1>Error getting user info</h1><p>Invalid response format from Zoom API</p>');
+                                return;
+                            }
+                            
+                            try {
+                                const user = JSON.parse(userData);
+                                
+                                // Validate required user fields
+                                if (!user || !user.id || !user.email) {
+                                    console.error('Zoom profile is missing required fields');
+                                    res.writeHead(500, { 'Content-Type': 'text/html' });
+                                    res.end('<h1>Error getting user info</h1><p>Invalid user data received from Zoom API</p>');
+                                    return;
+                                }
+                                
+                                // Store tokens in database
+                                const stmt = db.prepare(`
+                                    INSERT OR REPLACE INTO oauth_tokens 
+                                    (zoom_user_id, access_token, refresh_token, expires_at) 
+                                    VALUES (?, ?, ?, ?)
+                                `);
+                                stmt.run(user.id, tokens.access_token, tokens.refresh_token, Date.now() + (tokens.expires_in * 1000));
+                                
+                                // Check if user has paid
+                                const paidStmt = db.prepare('SELECT 1 FROM paid_hosts WHERE zoom_user_id = ?');
+                                const hasPaid = paidStmt.get(user.id) !== undefined;
+                                
+                                // DEBUG: Log authentication status only (no personal data)
+                                console.log('=== USER AUTHENTICATED ===');
+                                console.log('User successfully authenticated');
+                                console.log('Payment status checked:', hasPaid);
+                                console.log('=================');
+                                
+                                // Create secure session and redirect (no user data in URL)
+                                const sessionId = createSession(user.id, user.email, user.first_name + ' ' + user.last_name);
+                                const paidStatus = hasPaid ? 'true' : 'false';
+                                const redirectUrl = `/?auth=success&paid=${paidStatus}&session=${sessionId}`;
+                                res.writeHead(302, { 'Location': redirectUrl });
+                                res.end();
+                                
+                            } catch {
+                                console.error('Could not process Zoom profile');
+                                res.writeHead(500, { 'Content-Type': 'text/html' });
+                                res.end('<h1>Error getting user info</h1><p>Failed to parse user data from Zoom API</p>');
+                            }
+                        });
+                    });
+                    
+                    userInfoReq.on('error', (error) => {
+                        console.error('Error making user info request:', error);
+                        res.writeHead(500, { 'Content-Type': 'text/html' });
+                        res.end('<h1>Error fetching user information from Zoom</h1>');
+                    });
+                    
+                    userInfoReq.end();
+                    
+                } catch (error) {
+                    console.error('Error parsing tokens:', error);
+                    res.writeHead(500, { 'Content-Type': 'text/html' });
+                    res.end('<h1>Error processing tokens</h1>');
+                }
+            });
+        });
+        
+        tokenRequest.write(tokenData.toString());
+        tokenRequest.end();
+        return true;
+    }
+    
+    // Check auth status with session validation
+    if (url.pathname === '/auth/status') {
+        const bearer = req.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/i);
+        const sessionId = bearer?.[1] || url.searchParams.get('session');
+        res.setHeader('Cache-Control', 'no-store');
+        
+        if (sessionId) {
+            const session = validateSession(sessionId);
+            if (session) {
+                // Check if user has paid
+                const paidStmt = db.prepare('SELECT zoom_user_id FROM paid_hosts WHERE zoom_user_id = ?');
+                const paidRecord = paidStmt.get(session.zoom_user_id);
+                const hasPaid = !!paidRecord;
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ 
+                    authenticated: true, 
+                    paid: hasPaid,
+                    user: {
+                        id: session.zoom_user_id,
+                        email: session.user_email,
+                        name: session.user_name
+                    }
+                }));
+                return true;
+            }
+        }
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ authenticated: false, paid: false }));
+        return true;
+    }
+    
+    // Get product marketing info from Stripe
+    if (url.pathname === '/product-info') {
+        if (req.method !== 'GET') {
+            res.writeHead(405, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Method not allowed' }));
+            return true;
+        }
+        
+        (async () => {
+            try {
+                const product = await stripe.products.retrieve('prod_UChr0xPDcDuSyl');
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    name: product.name,
+                    description: product.description,
+                    features: product.features || [],
+                    images: product.images || []
+                }));
+                
+            } catch (error) {
+                console.error('Error fetching product info:', error);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Failed to fetch product info' }));
+            }
+        })();
+        return true;
+    }
+    
+    // Create payment session
+    if (url.pathname === '/create-payment-session') {
+        if (req.method !== 'POST') {
+            res.writeHead(405, { 'Content-Type': 'text/html' });
+            res.end('<h1>Method not allowed</h1>');
+            return true;
+        }
+        
+        console.log('Payment session request received');
+        console.log('Stripe configured:', !!stripe);
+        console.log('Stripe secret key configured:', !!process.env.STRIPE_API_SECRET);
+        
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const { zoomUserId } = JSON.parse(body); // Only need zoomUserId
+                console.log('Payment session creation started');
+                
+                // Look up user data from our database (not client)
+                const userStmt = db.prepare('SELECT user_email FROM user_sessions WHERE zoom_user_id = ? ORDER BY created_at DESC LIMIT 1');
+                const userRecord = userStmt.get(zoomUserId);
+                const userEmail = userRecord ? userRecord.user_email : null;
+                
+                if (!stripe) {
+                    console.error('Stripe not initialized - missing STRIPE_API_SECRET');
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Stripe not configured - missing STRIPE_API_SECRET' }));
+                    return;
+                }
+                
+                // Get product and price from Stripe
+                const product = await stripe.products.retrieve('prod_UChr0xPDcDuSyl'); // Your product ID
+                const price = await stripe.prices.retrieve('price_1TEIS2KlIqX3xNv9pmlDayrP'); // Your price ID
+                
+                const session = await stripe.checkout.sessions.create({
+                    payment_method_types: ['card'],
+                    mode: 'payment',
+                    line_items: [{
+                        price: price.id, // Use dynamic price from Stripe
+                        quantity: 1
+                    }],
+                    success_url: `https://tron-game-zoom.fly.dev/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                    cancel_url: `https://tron-game-zoom.fly.dev/payment-cancelled`,
+                    customer_email: userEmail,
+                    discounts: [], // Allow promo codes
+                    allow_promotion_codes: true, // Enable promo code field
+                    tax_id_collection: { enabled: true }, // Show tax breakdown - Canadian digital goods tax ID
+                    metadata: { zoom_user_id: zoomUserId } // Store user ID for payment verification
+                });
+                
+                console.log('Stripe session created:', session.id);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ sessionId: session.id, url: session.url }));
+                
+            } catch (error) {
+                console.error('Error creating payment session:', error);
+                console.error('Error details:', error.message);
+                console.error('Error type:', error.type);
+                console.error('Error stack:', error.stack);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Failed to create payment session: ' + error.message }));
+            }
+        });
+        return true;
+    }
+    
+    // Payment success callback
+    if (url.pathname === '/payment-success') {
+        const sessionId = url.searchParams.get('session_id');
+        
+        if (sessionId) {
+            (async () => {
+                try {
+                    // Verify the session was paid
+                    const session = await stripe.checkout.sessions.retrieve(sessionId);
+                    
+                    if (session.payment_status === 'paid' && session.metadata.zoom_user_id) {
+                        // Add user to paid_hosts table
+                        const stmt = db.prepare('INSERT OR REPLACE INTO paid_hosts (zoom_user_id, paid_at) VALUES (?, CURRENT_TIMESTAMP)');
+                        stmt.run(session.metadata.zoom_user_id);
+                        
+                        console.log(`User ${session.metadata.zoom_user_id} successfully paid for access`);
+                        
+                        // Find user session and redirect with session ID (no user data in URL)
+                        const userSessionStmt = db.prepare(`
+                            SELECT session_id 
+                            FROM user_sessions 
+                            WHERE zoom_user_id = ? 
+                            ORDER BY created_at DESC 
+                            LIMIT 1
+                        `);
+                        const userSession = userSessionStmt.get(session.metadata.zoom_user_id);
+                        
+                        if (userSession) {
+                            res.writeHead(302, { 'Location': `/?auth=success&paid=true&session=${userSession.session_id}` });
+                        } else {
+                            // Fallback without session
+                            res.writeHead(302, { 'Location': `/?auth=success&paid=true` });
+                        }
+                        res.end();
+                        return;
+                    }
+                } catch (error) {
+                    console.error('Error verifying payment:', error);
+                }
+                
+                // If payment verification fails, show error page
+                res.writeHead(400, { 'Content-Type': 'text/html' });
+                res.end('<h1>Payment verification failed</h1>');
+            })();
+            return true;
+        }
+        
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<h1>Missing payment session ID</h1>');
+        return true;
+    }
+    
+    // Payment cancelled
+    if (url.pathname === '/payment-cancelled') {
+        res.writeHead(302, { 'Location': '/?payment=cancelled' });
+        res.end();
+        return true;
+    }
+    
+    // Stripe webhook handler
+    if (url.pathname === '/webhook') {
+        if (req.method !== 'POST') {
+            res.writeHead(405, { 'Content-Type': 'text/html' });
+            res.end('<h1>Method not allowed</h1>');
+            return true;
+        }
+        
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            const sig = req.headers['stripe-signature'];
+            const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+            
+            if (!webhookSecret) {
+                console.error('STRIPE_WEBHOOK_SECRET not configured');
+                res.writeHead(500, { 'Content-Type': 'text/html' });
+                res.end('<h1>Webhook secret not configured</h1>');
+                return;
+            }
+            
+            try {
+                // Verify webhook signature
+                const event = JSON.parse(body);
+                console.log('Received Stripe webhook:', event.type);
+                
+                // Handle checkout.session.completed event
+                if (event.type === 'checkout.session.completed') {
+                    const session = event.data.object;
+                    
+                    // Find user session that created this payment
+                    const userSessionStmt = db.prepare(`
+                        SELECT zoom_user_id, user_email 
+                        FROM user_sessions 
+                        WHERE created_at >= datetime('now', '-1 hour')
+                        ORDER BY created_at DESC 
+                        LIMIT 1
+                    `);
+                    const userSession = userSessionStmt.get();
+                    
+                    if (userSession && userSession.zoom_user_id) {
+                        // Add user to paid_hosts table (permanent record)
+                        const stmt = db.prepare('INSERT OR REPLACE INTO paid_hosts (zoom_user_id, paid_at) VALUES (?, CURRENT_TIMESTAMP)');
+                        stmt.run(userSession.zoom_user_id);
+                        
+                        console.log(`Payment completed! Added user ${userSession.zoom_user_id} to paid_hosts table`);
+                    } else {
+                        console.warn('Payment completed but no matching user session found');
+                    }
+                }
+                
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end('Webhook received');
+                
+            } catch (error) {
+                console.error('Webhook error:', error);
+                res.writeHead(400, { 'Content-Type': 'text/html' });
+                res.end('<h1>Webhook error</h1>');
+            }
+        });
+        return true;
+    }
+    
+    return false;
+}
+
+const publicFiles = new Map([
+    ['index.html', 'text/html; charset=utf-8'],
+    ['privacy.html', 'text/html; charset=utf-8'],
+    ['tos.html', 'text/html; charset=utf-8'],
+    ['quickstart.html', 'text/html; charset=utf-8'],
+    ['support.html', 'text/html; charset=utf-8'],
+    ['return.html', 'text/html; charset=utf-8'],
+    ['Tron sample.gif', 'image/gif'],
+    ['bike.png', 'image/png'],
+    ['disk.png', 'image/png'],
+    ['Enter The Grid.mp3', 'audio/mpeg'],
+    ['Enter The Grid-2.mp3', 'audio/mpeg'],
+    ['Crashing.mp3', 'audio/mpeg']
+]);
+
+function serveHtml(res, content, host) {
+    const nonce = crypto.randomBytes(18).toString('base64');
+    const connectSources = ["'self'", 'https://api.stripe.com', 'https://r.stripe.com'];
+    if (/^[a-z0-9.\-:[\]]+$/i.test(host)) {
+        connectSources.push(`ws://${host}`, `wss://${host}`);
+    }
+    res.setHeader('Content-Security-Policy', [
+        "default-src 'self'",
+        "base-uri 'none'",
+        "object-src 'none'",
+        `script-src 'self' 'nonce-${nonce}' https://appssdk.zoom.us https://cdn.jsdelivr.net https://js.stripe.com`,
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "frame-src https://js.stripe.com https://hooks.stripe.com",
+        `connect-src ${connectSources.join(' ')}`
+    ].join('; '));
+    return content.toString('utf8').replace('<script nonce="{{CSP_NONCE}}">', `<script nonce="${nonce}">`);
+}
+
 const httpServer = http.createServer((req, res) => {
-    let filePath = req.url === '/' ? '/index.html' : decodeURIComponent(req.url);
-    filePath = path.join(__dirname, filePath);
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
 
-    const extname = path.extname(filePath);
-    const contentTypes = {
-        '.html': 'text/html',
-        '.js': 'text/javascript',
-        '.css': 'text/css',
-        '.json': 'application/json',
-        '.png': 'image/png',
-        '.jpg': 'image/jpg',
-        '.gif': 'image/gif',
-        '.svg': 'image/svg+xml',
-        '.mp3': 'audio/mpeg'
-    };
+    // Handle OAuth routes first
+    if (handleOAuthRoutes(req, res)) {
+        return;
+    }
+    
+    const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+    let filename;
+    try {
+        filename = parsedUrl.pathname === '/' ? 'index.html' : decodeURIComponent(parsedUrl.pathname.slice(1));
+    } catch {
+        res.writeHead(400);
+        res.end('Bad request');
+        return;
+    }
+    const contentType = publicFiles.get(filename);
+    if (!contentType) {
+        res.writeHead(404);
+        res.end('404 Not Found');
+        return;
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { Allow: 'GET, HEAD' });
+        res.end('Method not allowed');
+        return;
+    }
 
-    const contentType = contentTypes[extname] || 'application/octet-stream';
-
-    fs.readFile(filePath, (error, content) => {
+    fs.readFile(path.join(__dirname, filename), (error, content) => {
         if (error) {
             if (error.code === 'ENOENT') {
                 res.writeHead(404);
@@ -886,299 +1416,315 @@ const httpServer = http.createServer((req, res) => {
                 res.writeHead(500);
                 res.end('Server Error: ' + error.code);
             }
-        } else {
-            res.writeHead(200, { 'Content-Type': contentType });
-            res.end(content, 'utf-8');
+            return;
         }
+        const body = contentType.startsWith('text/html') ? serveHtml(res, content, parsedUrl.host) : content;
+        res.writeHead(200, { 'Content-Type': contentType });
+        res.end(req.method === 'HEAD' ? undefined : body);
     });
 });
 
 const wss = new WebSocket.Server({ server: httpServer, path: '/ws' });
 
-let gameState = null;
-let clients = {};
-let lobbyReady = {};
-let numPlayers = 2;
-let gameMode = 'time';
-let timeLimit = 300;
-let maxLives = 5;
-let gameInterval = null;
-let previousState = null;
-let useBinaryProtocol = true;
+class GameRoom {
+    constructor(roomId) {
+        this.roomId = roomId;
+        this.gameState = null;
+        this.clients = {}; // playerId -> ws
+        this.lobbyReady = {}; // playerId -> boolean
+        this.playerSessions = {}; // sessionId -> playerId
+        this.numPlayers = 2;
+        this.gameMode = 'time';
+        this.timeLimit = 300;
+        this.maxLives = 5;
+        this.gameInterval = null;
+        this.previousState = null;
+        this.useBinaryProtocol = true;
+    }
+
+    configure(settings) {
+        const readInteger = (value, fallback, min, max) => {
+            if (typeof value !== 'number' && typeof value !== 'string') return fallback;
+            const number = Number.parseInt(value, 10);
+            return Number.isNaN(number) ? fallback : Math.max(min, Math.min(max, number));
+        };
+
+        this.numPlayers = readInteger(settings.numPlayers, this.numPlayers, 2, 12);
+        this.timeLimit = readInteger(settings.timeLimit, this.timeLimit, 60, 600);
+        this.maxLives = readInteger(settings.maxLives, this.maxLives, 1, 10);
+        if (settings.gameMode === 'time' || settings.gameMode === 'lives') {
+            this.gameMode = settings.gameMode;
+        }
+    }
+
+    broadcastLobbyUpdate() {
+        const lobbyData = {
+            type: 'lobby_update',
+            players: Object.keys(this.clients).length,
+            max_players: this.numPlayers,
+            ready_count: Object.values(this.lobbyReady).filter(r => r).length,
+            game_mode: this.gameMode
+        };
+        this.broadcast(lobbyData);
+    }
+
+    startGame() {
+        if (this.gameState) {
+            this.gameState.startGame();
+            this.gameInterval = setInterval(() => {
+                if (!this.gameState) {
+                    clearInterval(this.gameInterval);
+                    return;
+                }
+                this.gameState.update();
+                this.broadcast({
+                    type: 'game_update',
+                    state: this.gameState.toJSON()
+                });
+
+                if (this.gameState.gameOver) {
+                    console.log(`[Room ${this.roomId}] Game over! Winner: ${this.gameState.winner ? this.gameState.winner.name : 'None'}`);
+                    clearInterval(this.gameInterval);
+                    this.gameInterval = null;
+                    this.gameState = null;
+                }
+            }, 1000 / 15);
+        }
+    }
+
+    computeDelta(current, previous) {
+        if (!previous) return current;
+        const delta = { type: current.type };
+        if (current.type === 'game_update' && previous.type === 'game_update') {
+            delta.state = {};
+            const currState = current.state;
+            const prevState = previous.state;
+            if (currState.gameStarted !== prevState.gameStarted) delta.state.gameStarted = currState.gameStarted;
+            if (currState.gameOver !== prevState.gameOver) delta.state.gameOver = currState.gameOver;
+            if (currState.timeRemaining !== prevState.timeRemaining) delta.state.timeRemaining = currState.timeRemaining;
+            if (currState.gridWidth !== prevState.gridWidth) delta.state.gridWidth = currState.gridWidth;
+            if (currState.gridHeight !== prevState.gridHeight) delta.state.gridHeight = currState.gridHeight;
+            if (!delta.state.gridWidth) delta.state.gridWidth = currState.gridWidth;
+            if (!delta.state.gridHeight) delta.state.gridHeight = currState.gridHeight;
+            if (typeof objectEquals !== 'undefined') {
+                if (!objectEquals(currState.powerUp, prevState.powerUp)) delta.state.powerUp = currState.powerUp;
+                if (!objectEquals(currState.walls, prevState.walls)) delta.state.walls = currState.walls;
+                if (!objectEquals(currState.winner, prevState.winner)) delta.state.winner = currState.winner;
+            } else {
+                delta.state.powerUp = currState.powerUp;
+                delta.state.walls = currState.walls;
+                delta.state.winner = currState.winner;
+            }
+            delta.state.cycles = {};
+            for (const [id, cycle] of Object.entries(currState.cycles)) {
+                const prevCycle = prevState.cycles[id];
+                if (!prevCycle) {
+                    delta.state.cycles[id] = cycle;
+                } else {
+                    const cycleDelta = {
+                        playerId: id, name: cycle.name, color: cycle.color,
+                        lives: cycle.lives, deaths: cycle.deaths, score: cycle.score
+                    };
+                    if (cycle.x !== prevCycle.x) cycleDelta.x = cycle.x;
+                    if (cycle.y !== prevCycle.y) cycleDelta.y = cycle.y;
+                    if (cycle.direction !== prevCycle.direction) cycleDelta.direction = cycle.direction;
+                    if (cycle.alive !== prevCycle.alive) cycleDelta.alive = cycle.alive;
+                    if (cycle.speedBoost !== prevCycle.speedBoost) cycleDelta.speedBoost = cycle.speedBoost;
+                    if (cycle.fading !== prevCycle.fading) cycleDelta.fading = cycle.fading;
+                    if (cycle.deathTimestamp !== prevCycle.deathTimestamp) cycleDelta.deathTimestamp = cycle.deathTimestamp;
+                    if (typeof arrayEquals !== 'undefined') {
+                        if (!arrayEquals(cycle.trail, prevCycle.trail)) cycleDelta.trail = cycle.trail;
+                        if (!arrayEquals(cycle.disconnectedTrails, prevCycle.disconnectedTrails)) cycleDelta.disconnectedTrails = cycle.disconnectedTrails;
+                    } else {
+                        cycleDelta.trail = cycle.trail;
+                        cycleDelta.disconnectedTrails = cycle.disconnectedTrails;
+                    }
+                    if (typeof objectEquals !== 'undefined') {
+                        if (!objectEquals(cycle.disc, prevCycle.disc)) cycleDelta.disc = cycle.disc;
+                    } else {
+                        cycleDelta.disc = cycle.disc;
+                    }
+                    if (cycle.discCooldown !== prevCycle.discCooldown) cycleDelta.discCooldown = cycle.discCooldown;
+                    delta.state.cycles[id] = cycleDelta;
+                }
+            }
+            if (Object.keys(delta.state).length === 0 || Object.keys(delta.state.cycles || {}).length === 0) return null;
+        }
+        return delta;
+    }
+
+    broadcast(data) {
+        let messageToSend = data;
+        if (data.type === 'game_update') {
+            const delta = this.computeDelta(data, this.previousState);
+            if (!delta) return;
+            messageToSend = delta;
+            this.previousState = JSON.parse(JSON.stringify(data));
+        }
+        let message;
+        if (this.useBinaryProtocol && data.type === 'game_update') {
+            message = msgpack.encode(messageToSend);
+        } else {
+            message = JSON.stringify(messageToSend);
+        }
+        for (const ws of Object.values(this.clients)) {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(message);
+            }
+        }
+    }
+}
+
+const activeRooms = new Map();
+
+function getRoom(roomId) {
+    if (!activeRooms.has(roomId)) {
+        activeRooms.set(roomId, new GameRoom(roomId));
+        console.log(`[SERVER] Created new room: ${roomId}`);
+    }
+    return activeRooms.get(roomId);
+}
 
 wss.on('connection', (ws) => {
-    console.log('New client connected');
+    ws.roomId = null;
+    ws.playerId = null;
 
     ws.on('message', (message) => {
         let data;
-        try {
-            data = JSON.parse(message);
-        } catch (error) {
-            console.error('[SERVER] Invalid JSON received:', error.message);
-            return;
-        }
+        try { data = JSON.parse(message); } catch (e) { return; }
+        if (!data || typeof data !== 'object') return;
 
         if (data.type === 'join') {
-            const sanitizedName = String(data.name || 'Player').substring(0, 15).replace(/[<>]/g, '');
-            
-            if (!gameState) {
-                gameState = new GameState(numPlayers, gameMode, timeLimit, maxLives);
-                console.log(`[SERVER] Created new game state for ${numPlayers} players, ${maxLives} lives`);
-            }
-            
-            const playerId = `player_${Object.keys(gameState.cycles).length}`;
+            const roomId = data.roomId || 'dev_room';
+            const sessionId = data.sessionId || null;
+            ws.roomId = roomId;
+            const room = getRoom(roomId);
 
-            if (gameState.addPlayer(playerId, sanitizedName)) {
-                clients[playerId] = ws;
-                ws.playerId = playerId;
-                lobbyReady[playerId] = false;
-
-                const isHost = playerId === 'player_0';
+            if (sessionId && room.playerSessions[sessionId]) {
+                const oldPlayerId = room.playerSessions[sessionId];
+                if (room.clients[oldPlayerId] && room.clients[oldPlayerId] !== ws) {
+                    room.clients[oldPlayerId].close();
+                }
                 
-                ws.send(JSON.stringify({
-                    type: 'join_success',
-                    playerId: playerId,
-                    isHost: isHost,
-                    numPlayers: numPlayers,
-                    gameMode: gameMode,
-                    timeLimit: timeLimit,
-                    maxLives: maxLives
-                }));
-
-                console.log(`[SERVER] ${sanitizedName} joined as ${playerId} (${Object.keys(clients).length}/${numPlayers})`);
-                console.log(`[SERVER] Total players in game state: ${Object.keys(gameState.cycles).length}`);
-                broadcastLobbyUpdate();
-            } else {
-                ws.send(JSON.stringify({ type: 'join_failed', reason: 'Game full' }));
-                ws.close();
+                room.clients[oldPlayerId] = ws;
+                ws.playerId = oldPlayerId;
+                
+                const isHost = oldPlayerId === 'player_0';
+                
+                if (room.gameState && room.gameState.gameStarted) {
+                    ws.send(JSON.stringify({ type: 'reconnected', isHost: isHost, playerId: oldPlayerId }));
+                    console.log(`[SERVER] Player ${oldPlayerId} seamlessly reconnected to room ${roomId}`);
+                    return;
+                }
             }
-        } else if (data.type === 'ready') {
-            lobbyReady[ws.playerId] = true;
-            console.log(`${ws.playerId} is ready`);
-            broadcastLobbyUpdate();
 
-            if (Object.values(lobbyReady).every(r => r) && Object.keys(lobbyReady).length === numPlayers) {
-                console.log('All players ready! Starting game...');
-                startGame();
+            const sanitizedName = String(data.name || 'Player').substring(0, 15).replace(/[<>]/g, '');
+            if (!room.gameState) {
+                if (data.settings && typeof data.settings === 'object') {
+                    room.configure(data.settings);
+                }
+                room.gameState = new GameState(room.numPlayers, room.gameMode, room.timeLimit, room.maxLives);
+            }
+            
+            if (!ws.playerId) {
+                const playerId = `player_${Object.keys(room.gameState.cycles).length}`;
+                if (room.gameState.addPlayer(playerId, sanitizedName)) {
+                    room.clients[playerId] = ws;
+                    ws.playerId = playerId;
+                    room.lobbyReady[playerId] = false;
+                    
+                    if (sessionId) room.playerSessions[sessionId] = playerId;
+                } else {
+                    ws.send(JSON.stringify({ type: 'join_failed', reason: 'Game full' }));
+                    ws.close();
+                    return;
+                }
+            }
+
+            const isHost = ws.playerId === 'player_0';
+            ws.send(JSON.stringify({
+                type: 'join_success', playerId: ws.playerId, isHost: isHost,
+                numPlayers: room.numPlayers, gameMode: room.gameMode,
+                timeLimit: room.timeLimit, maxLives: room.maxLives
+            }));
+
+            room.broadcastLobbyUpdate();
+            
+        } else if (data.type === 'ready') {
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            room.lobbyReady[ws.playerId] = true;
+            room.broadcastLobbyUpdate();
+
+            if (Object.values(room.lobbyReady).every(r => r) && Object.keys(room.lobbyReady).length === room.numPlayers) {
+                room.startGame();
             }
         } else if (data.type === 'input') {
-            if (gameState && gameState.gameStarted && ws.playerId in gameState.cycles) {
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            if (room.gameState && room.gameState.gameStarted && ws.playerId in room.gameState.cycles) {
                 const validDirections = ['UP', 'DOWN', 'LEFT', 'RIGHT'];
                 if (validDirections.includes(data.direction)) {
-                    gameState.cycles[ws.playerId].changeDirection(data.direction);
+                    room.gameState.cycles[ws.playerId].changeDirection(data.direction);
                 }
             }
         } else if (data.type === 'disconnect_trail') {
-            if (gameState && gameState.gameStarted && ws.playerId in gameState.cycles) {
-                gameState.cycles[ws.playerId].disconnectTrail();
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            if (room.gameState && room.gameState.gameStarted && ws.playerId in room.gameState.cycles) {
+                room.gameState.cycles[ws.playerId].disconnectTrail();
             }
         } else if (data.type === 'hold_disc') {
-            if (gameState && gameState.gameStarted && ws.playerId in gameState.cycles) {
-                gameState.cycles[ws.playerId].holdDisc();
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            if (room.gameState && room.gameState.gameStarted && ws.playerId in room.gameState.cycles) {
+                room.gameState.cycles[ws.playerId].holdDisc();
             }
         } else if (data.type === 'release_disc') {
-            if (gameState && gameState.gameStarted && ws.playerId in gameState.cycles) {
-                gameState.cycles[ws.playerId].releaseDisc();
+            if (!ws.roomId) return;
+            const room = getRoom(ws.roomId);
+            if (room.gameState && room.gameState.gameStarted && ws.playerId in room.gameState.cycles) {
+                room.gameState.cycles[ws.playerId].releaseDisc();
             }
         } else if (data.type === 'config') {
-            if (ws.playerId && ws.playerId !== 'player_0') {
-                console.log(`[SERVER] Config rejected - ${ws.playerId} is not host`);
-                return;
-            }
+            if (!ws.roomId || ws.playerId !== 'player_0') return;
+            const room = getRoom(ws.roomId);
             
-            if (!gameState || Object.keys(gameState.cycles).length === 0) {
-                const validNumPlayers = Math.max(2, Math.min(12, parseInt(data.numPlayers) || numPlayers));
-                const validGameMode = ['time', 'lives'].includes(data.gameMode) ? data.gameMode : gameMode;
-                const validTimeLimit = Math.max(60, Math.min(600, parseInt(data.timeLimit) || timeLimit));
-                const validMaxLives = Math.max(1, Math.min(10, parseInt(data.maxLives) || maxLives));
-                
-                numPlayers = validNumPlayers;
-                gameMode = validGameMode;
-                timeLimit = validTimeLimit;
-                maxLives = validMaxLives;
-                
-                if (gameState) {
-                    gameState = null;
-                }
-                
-                console.log(`[SERVER] Config received: ${numPlayers} players, ${gameMode} mode, ${maxLives} lives`);
-            } else {
-                console.log(`[SERVER] Config ignored - game has ${Object.keys(gameState.cycles).length} players already`);
+            if (!room.gameState || Object.keys(room.gameState.cycles).length === 0) {
+                room.configure(data);
+                if (room.gameState) room.gameState = null;
             }
         }
     });
 
     ws.on('close', () => {
-        if (ws.playerId) {
+        if (ws.roomId && ws.playerId) {
+            const room = getRoom(ws.roomId);
             const wasHost = ws.playerId === 'player_0';
             
-            delete clients[ws.playerId];
-            delete lobbyReady[ws.playerId];
-            
-            if (wasHost) {
-                console.log(`[SERVER] Host disconnected - resetting game state`);
-                if (gameInterval) {
-                    clearInterval(gameInterval);
-                    gameInterval = null;
-                }
-                gameState = null;
-                clients = {};
-                lobbyReady = {};
-                Object.values(wss.clients).forEach(client => {
-                    if (client.readyState === 1) {
-                        client.send(JSON.stringify({ type: 'host_disconnected' }));
-                        client.close();
-                    }
-                });
+            if (room.gameState && room.gameState.gameStarted) {
+                delete room.clients[ws.playerId];
             } else {
-                console.log(`${ws.playerId} disconnected`);
-                if (gameState && !gameState.gameStarted) {
-                    gameState.removePlayer(ws.playerId);
+                delete room.clients[ws.playerId];
+                delete room.lobbyReady[ws.playerId];
+                if (room.gameState) room.gameState.removePlayer(ws.playerId);
+                
+                if (wasHost) {
+                    if (room.gameInterval) clearInterval(room.gameInterval);
+                    activeRooms.delete(ws.roomId);
+                    Object.values(room.clients).forEach(client => {
+                        if (client.readyState === 1) {
+                            client.send(JSON.stringify({ type: 'host_disconnected' }));
+                            client.close();
+                        }
+                    });
+                } else {
+                    room.broadcastLobbyUpdate();
                 }
-                broadcastLobbyUpdate();
             }
         }
     });
 });
-
-function broadcastLobbyUpdate() {
-    const lobbyData = {
-        type: 'lobby_update',
-        players: Object.keys(clients).length,
-        max_players: numPlayers,
-        ready_count: Object.values(lobbyReady).filter(r => r).length,
-        game_mode: gameMode
-    };
-    broadcast(lobbyData);
-}
-
-function startGame() {
-    if (gameState) {
-        gameState.startGame();
-        gameInterval = setInterval(() => {
-            if (!gameState) {
-                clearInterval(gameInterval);
-                return;
-            }
-            gameState.update();
-            broadcast({
-                type: 'game_update',
-                state: gameState.toJSON()
-            });
-
-            if (gameState.gameOver) {
-                console.log(`Game over! Winner: ${gameState.winner ? gameState.winner.name : 'None'}`);
-                clearInterval(gameInterval);
-                gameInterval = null;
-                gameState = null;
-            }
-        }, 1000 / 15);
-    }
-}
-
-function computeDelta(current, previous) {
-    if (!previous) return current;
-    
-    const delta = { type: current.type };
-    
-    if (current.type === 'game_update' && previous.type === 'game_update') {
-        delta.state = {};
-        const currState = current.state;
-        const prevState = previous.state;
-        
-        if (currState.gameStarted !== prevState.gameStarted) delta.state.gameStarted = currState.gameStarted;
-        if (currState.gameOver !== prevState.gameOver) delta.state.gameOver = currState.gameOver;
-        if (currState.timeRemaining !== prevState.timeRemaining) delta.state.timeRemaining = currState.timeRemaining;
-        if (currState.gridWidth !== prevState.gridWidth) delta.state.gridWidth = currState.gridWidth;
-        if (currState.gridHeight !== prevState.gridHeight) delta.state.gridHeight = currState.gridHeight;
-        
-        if (!delta.state.gridWidth) delta.state.gridWidth = currState.gridWidth;
-        if (!delta.state.gridHeight) delta.state.gridHeight = currState.gridHeight;
-        
-        if (!objectEquals(currState.powerUp, prevState.powerUp)) {
-            delta.state.powerUp = currState.powerUp;
-        }
-        
-        if (!objectEquals(currState.walls, prevState.walls)) {
-            delta.state.walls = currState.walls;
-        }
-        
-        if (!objectEquals(currState.winner, prevState.winner)) {
-            delta.state.winner = currState.winner;
-        }
-        
-        delta.state.cycles = {};
-        for (const [id, cycle] of Object.entries(currState.cycles)) {
-            const prevCycle = prevState.cycles[id];
-            if (!prevCycle) {
-                delta.state.cycles[id] = cycle;
-            } else {
-                const cycleDelta = {
-                    playerId: id,
-                    name: cycle.name,
-                    color: cycle.color,
-                    lives: cycle.lives,
-                    deaths: cycle.deaths,
-                    score: cycle.score
-                };
-                
-                if (cycle.x !== prevCycle.x) cycleDelta.x = cycle.x;
-                if (cycle.y !== prevCycle.y) cycleDelta.y = cycle.y;
-                if (cycle.direction !== prevCycle.direction) cycleDelta.direction = cycle.direction;
-                if (cycle.alive !== prevCycle.alive) cycleDelta.alive = cycle.alive;
-                if (cycle.speedBoost !== prevCycle.speedBoost) cycleDelta.speedBoost = cycle.speedBoost;
-                if (cycle.fading !== prevCycle.fading) cycleDelta.fading = cycle.fading;
-                if (cycle.deathTimestamp !== prevCycle.deathTimestamp) cycleDelta.deathTimestamp = cycle.deathTimestamp;
-                
-                if (!arrayEquals(cycle.trail, prevCycle.trail)) {
-                    cycleDelta.trail = cycle.trail;
-                }
-                if (!arrayEquals(cycle.disconnectedTrails, prevCycle.disconnectedTrails)) {
-                    cycleDelta.disconnectedTrails = cycle.disconnectedTrails;
-                }
-                
-                if (!objectEquals(cycle.disc, prevCycle.disc)) {
-                    cycleDelta.disc = cycle.disc;
-                }
-                if (cycle.discCooldown !== prevCycle.discCooldown) {
-                    cycleDelta.discCooldown = cycle.discCooldown;
-                }
-                
-                delta.state.cycles[id] = cycleDelta;
-            }
-        }
-        
-        if (Object.keys(delta.state).length === 0 || Object.keys(delta.state.cycles || {}).length === 0) {
-            return null;
-        }
-    }
-    
-    return delta;
-}
-
-function broadcast(data) {
-    let messageToSend = data;
-    
-    if (data.type === 'game_update') {
-        const delta = computeDelta(data, previousState);
-        if (!delta) return;
-        messageToSend = delta;
-        previousState = JSON.parse(JSON.stringify(data));
-    }
-    
-    let message;
-    if (useBinaryProtocol && data.type === 'game_update') {
-        message = msgpack.encode(messageToSend);
-    } else {
-        message = JSON.stringify(messageToSend);
-    }
-    
-    for (const ws of Object.values(clients)) {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(message);
-        }
-    }
-}
 
 httpServer.listen(PORT, () => {
     console.log(`HTTP Server running on http://localhost:${PORT}`);

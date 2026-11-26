@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TRON Light Cycles</title>
+    <title>TRON Light Cycles - Multiplayer Game</title>
     <script src="https://cdn.jsdelivr.net/npm/msgpack-lite@0.1.26/dist/msgpack.min.js"></script>
     <style>
         * {
@@ -23,13 +23,136 @@
             height: 100vh;
         }
 
+        .grid-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(0, 64, 96, 0.3) 39px, rgba(0, 64, 96, 0.3) 40px),
+                repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(0, 64, 96, 0.3) 39px, rgba(0, 64, 96, 0.3) 40px);
+            z-index: -1;
+        }
+
+        /* ===== Welcome Screen Styles ===== */
+        .screen {
+            display: none;
+            min-height: 100vh;
+            width: 100%;
+        }
+        .screen.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .welcome-container {
+            text-align: center;
+            padding: 2rem;
+            max-width: 1200px;
+            width: 90%;
+        }
+
+        .game-title {
+            font-size: clamp(2rem, 8vw, 4rem);
+            color: #00ffff;
+            text-shadow: 0 0 20px #00ffff, 0 0 40px #00ffff;
+            margin-bottom: 2rem;
+            letter-spacing: 0.2em;
+            font-weight: bold;
+        }
+
+        .game-preview {
+            position: relative;
+            margin: 2rem auto;
+            border: 3px solid #00c8ff;
+            border-radius: 15px;
+            overflow: hidden;
+            max-width: 900px;
+            width: 100%;
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.3);
+        }
+
+        .preview-gif {
+            width: 100%;
+            height: auto;
+            display: block;
+            animation: fadeIn 1s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .auth-section {
+            margin: 3rem 0;
+        }
+
+        .auth-status {
+            margin: 1.5rem 0;
+            font-size: 1.2rem;
+            min-height: 2rem;
+        }
+
+        .zoom-login-btn {
+            background: rgba(0, 100, 200, 0.3);
+            border: 2px solid #0064c8;
+            color: #00ffff;
+            padding: 1.5rem 4rem;
+            font-size: 1.2rem;
+            margin: 1.5rem 0;
+            transition: all 0.3s;
+            border-radius: 10px;
+            font-weight: bold;
+            letter-spacing: 0.1em;
+            cursor: pointer;
+        }
+
+        .zoom-login-btn:hover {
+            background: rgba(0, 150, 255, 0.4);
+            box-shadow: 0 0 25px rgba(0, 150, 255, 0.8);
+            transform: translateY(-2px);
+        }
+
+        /* Responsive Welcome Screen */
+        @media (max-width: 768px) {
+            .welcome-container {
+                padding: 1rem;
+                width: 95%;
+            }
+            .game-title {
+                font-size: clamp(1.5rem, 6vw, 2.5rem);
+                margin-bottom: 1rem;
+            }
+            .game-preview {
+                margin: 1rem auto;
+                border-width: 2px;
+            }
+            .zoom-login-btn {
+                padding: 1rem 2rem;
+                font-size: 1rem;
+            }
+        }
+
+        /* ===== Game Screen Styles ===== */
+        #gameScreen {
+            display: none;
+        }
+        #gameScreen.active {
+            display: block !important;
+        }
+
         #container {
             text-align: center;
             width: 100%;
             max-width: 1400px;
+            margin: 0 auto;
+            padding: 10px;
         }
 
-        h1 {
+        #container h1 {
             font-size: 3em;
             text-shadow: 0 0 20px #00ffff, 0 0 40px #00ffff;
             margin-bottom: 30px;
@@ -71,7 +194,7 @@
             border-color: #00ffff;
             box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
         }
-        
+
         input:disabled, select:disabled {
             opacity: 0.5;
             cursor: not-allowed;
@@ -125,18 +248,6 @@
             line-height: 1.8;
         }
 
-        .grid-bg {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image: 
-                repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(0, 64, 96, 0.3) 39px, rgba(0, 64, 96, 0.3) 40px),
-                repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(0, 64, 96, 0.3) 39px, rgba(0, 64, 96, 0.3) 40px);
-            z-index: -1;
-        }
-
         #scoreboard {
             display: flex;
             justify-content: center;
@@ -182,7 +293,7 @@
             flex: 1;
             margin: 0;
         }
-        
+
         #audioControls {
             position: fixed;
             top: 20px;
@@ -191,12 +302,16 @@
             border: 2px solid #00c8ff;
             padding: 15px;
             z-index: 1000;
-            display: flex;
+            display: none; /* Hidden until game screen */
             flex-direction: column;
             gap: 10px;
             min-width: 200px;
         }
-        
+
+        #audioControls.visible {
+            display: flex;
+        }
+
         #audioControl {
             background: rgba(0, 200, 255, 0.2);
             border: 2px solid #00c8ff;
@@ -207,12 +322,12 @@
             font-size: 1em;
             width: 100%;
         }
-        
+
         #audioControl:hover {
             background: rgba(0, 255, 255, 0.3);
             box-shadow: 0 0 15px rgba(0, 255, 255, 0.6);
         }
-        
+
         .volume-control {
             display: flex;
             align-items: center;
@@ -221,12 +336,12 @@
             font-family: 'Courier New', monospace;
             font-size: 0.9em;
         }
-        
+
         .volume-control label {
             margin: 0;
             font-size: 0.9em;
         }
-        
+
         #volumeSlider {
             flex: 1;
             -webkit-appearance: none;
@@ -236,7 +351,7 @@
             outline: none;
             border-radius: 3px;
         }
-        
+
         #volumeSlider::-webkit-slider-thumb {
             -webkit-appearance: none;
             appearance: none;
@@ -247,7 +362,7 @@
             border-radius: 50%;
             box-shadow: 0 0 10px #00ffff;
         }
-        
+
         #volumeSlider::-moz-range-thumb {
             width: 16px;
             height: 16px;
@@ -257,7 +372,7 @@
             border: none;
             box-shadow: 0 0 10px #00ffff;
         }
-        
+
         #volumeValue {
             min-width: 35px;
             text-align: right;
@@ -266,76 +381,108 @@
 </head>
 <body>
     <div class="grid-bg"></div>
+
+    <!-- Audio Controls (shown on game screen) -->
     <div id="audioControls">
-        <button id="audioControl" onclick="toggleAudio()">🔊 SOUND ON</button>
+        <button id="audioControl">&#x1F508; SOUND ON</button>
         <div class="volume-control">
-            <label>🔊</label>
-            <input type="range" id="volumeSlider" min="0" max="100" value="100" oninput="updateVolume(this.value)">
+            <label>&#x1F50A;</label>
+            <input type="range" id="volumeSlider" min="0" max="100" value="100">
             <span id="volumeValue">100%</span>
         </div>
     </div>
-    <div id="container">
-        <h1>TRON LIGHT CYCLES</h1>
 
-        <div id="menu" class="active">
-            <div class="input-group">
-                <label for="playerName">Player Name</label>
-                <input type="text" id="playerName" placeholder="Enter your name" maxlength="15">
+    <!-- ===== WELCOME SCREEN (Auth + Payment Gate) ===== -->
+    <div id="welcomeScreen" class="screen active">
+        <div class="welcome-container">
+            <h1 class="game-title">TRON LIGHT CYCLES</h1>
+
+            <div class="game-preview">
+                <img src="Tron sample.gif" alt="TRON Game Preview" class="preview-gif">
             </div>
 
-            <div class="config-row">
-                <div class="input-group">
-                    <label for="numPlayers">Players (2-12)</label>
-                    <input type="number" id="numPlayers" min="2" max="12" value="2">
+            <div class="auth-section">
+                <div class="info-text">
+                    <h3>TRON Light Cycles - Multiplayer Game</h3>
                 </div>
-                <div class="input-group">
-                    <label for="gameMode">Game Mode</label>
-                    <select id="gameMode">
-                        <option value="time">TIME</option>
-                        <option value="lives">LIVES</option>
-                    </select>
+
+                <div id="authStatus" class="auth-status">
+                    <p style="color: #ff6666;">Login required to play</p>
                 </div>
+
+                <button id="zoomLoginBtn" class="zoom-login-btn">
+                    LOGIN WITH ZOOM
+                </button>
             </div>
-
-            <div class="input-group" id="timeLimitGroup">
-                <label for="timeLimit">Time Limit (seconds)</label>
-                <input type="number" id="timeLimit" min="60" max="600" step="60" value="300">
-            </div>
-
-            <div class="input-group" id="maxLivesGroup" style="display: none;">
-                <label for="maxLives">Number of Lives</label>
-                <input type="number" id="maxLives" min="1" max="10" value="5">
-            </div>
-
-            <div class="instructions">
-                <p><strong>Controls:</strong> W (Up) | A (Left) | S (Down) | D (Right) | SPACE (Disconnect Trail) | E (Throw Disc)</p>
-                <p><strong>Rules:</strong> Drive your light cycle and avoid hitting any trail.</p>
-                <p><strong>Trail Mechanic:</strong> Disconnect with SPACE BAR for a small boost.</p>
-                <p><strong>Disc Mechanic:</strong> HOLD E to hold disc at your side, RELEASE to throw. Disc kills on contact!</p>
-            </div>
-
-            <button onclick="connectToGame()">JOIN GAME</button>
-        </div>
-
-        <div id="lobby">
-            <div class="info-text" id="lobbyPlayers">Waiting for players...</div>
-            <div class="info-text" id="lobbyReady">Ready: 0/2</div>
-            <div class="info-text" id="lobbyMode">Mode: TIME</div>
-            <button onclick="sendReady()">READY</button>
-        </div>
-
-        <div id="game-container">
-            <div id="timer"></div>
-            <canvas id="canvas" width="1200" height="700"></canvas>
-            <div id="scoreboard"></div>
-        </div>
-
-        <div id="game-over">
-            <div class="winner-announcement" id="winnerText"></div>
-            <button onclick="location.reload()">PLAY AGAIN</button>
         </div>
     </div>
 
+    <!-- ===== GAME SCREEN (Original working game) ===== -->
+    <div id="gameScreen" class="screen">
+        <div id="container">
+            <h1>TRON LIGHT CYCLES</h1>
+
+            <div id="menu" class="active">
+                <div class="input-group">
+                    <label for="playerName">Player Name</label>
+                    <input type="text" id="playerName" placeholder="Enter your name" maxlength="15">
+                </div>
+
+                <div class="config-row">
+                    <div class="input-group">
+                        <label for="numPlayers">Players (2-12)</label>
+                        <input type="number" id="numPlayers" min="2" max="12" value="2">
+                    </div>
+                    <div class="input-group">
+                        <label for="gameMode">Game Mode</label>
+                        <select id="gameMode">
+                            <option value="time">TIME</option>
+                            <option value="lives">LIVES</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="input-group" id="timeLimitGroup">
+                    <label for="timeLimit">Time Limit (seconds)</label>
+                    <input type="number" id="timeLimit" min="60" max="600" step="60" value="300">
+                </div>
+
+                <div class="input-group" id="maxLivesGroup" style="display: none;">
+                    <label for="maxLives">Number of Lives</label>
+                    <input type="number" id="maxLives" min="1" max="10" value="5">
+                </div>
+
+                <div class="instructions">
+                    <p><strong>Controls:</strong> W (Up) | A (Left) | S (Down) | D (Right) | SPACE (Disconnect Trail) | E (Throw Disc)</p>
+                    <p><strong>Rules:</strong> Drive your light cycle and avoid hitting any trail.</p>
+                    <p><strong>Trail Mechanic:</strong> Disconnect with SPACE BAR for a small boost.</p>
+                    <p><strong>Disc Mechanic:</strong> HOLD E to hold disc at your side, RELEASE to throw. Disc kills on contact!</p>
+                </div>
+
+                <button id="joinGameBtn">JOIN GAME</button>
+            </div>
+
+            <div id="lobby">
+                <div class="info-text" id="lobbyPlayers">Waiting for players...</div>
+                <div class="info-text" id="lobbyReady">Ready: 0/2</div>
+                <div class="info-text" id="lobbyMode">Mode: TIME</div>
+                <button id="readyBtn">READY</button>
+            </div>
+
+            <div id="game-container">
+                <div id="timer"></div>
+                <canvas id="canvas" width="1200" height="700"></canvas>
+                <div id="scoreboard"></div>
+            </div>
+
+            <div id="game-over">
+                <div class="winner-announcement" id="winnerText"></div>
+                <button id="playAgainBtn">PLAY AGAIN</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio elements -->
     <audio id="track1" preload="auto">
         <source src="Enter The Grid.mp3" type="audio/mpeg">
     </audio>
@@ -346,7 +493,127 @@
         <source src="Crashing.mp3" type="audio/mpeg">
     </audio>
 
-    <script>
+    <script nonce="{{CSP_NONCE}}">
+        // ===== AUTH & PAYMENT (from Zoom integration) =====
+        let isAuthenticated = false;
+        let hasPaid = false;
+        let isDevMode = false;
+        let currentUser = null;
+        let currentRoomId = null;
+        let currentUserSessionId = null;
+
+        function loginWithZoom() {
+            window.location.href = '/auth/zoom';
+        }
+
+        async function initiatePayment() {
+            if (!currentUser) {
+                alert('User information not available. Please try logging in again.');
+                return;
+            }
+
+            try {
+                const response = await fetch('/create-payment-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ zoomUserId: currentUser.id })
+                });
+
+                const data = await response.json();
+
+                if (data.url) {
+                    window.location.href = data.url;
+                } else {
+                    alert('Failed to create payment session: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Payment error:', error);
+                alert('Payment failed: ' + error.message);
+            }
+        }
+
+        async function checkAuthStatus() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const sessionId = urlParams.get('session');
+
+            currentRoomId = urlParams.get('roomId') || 'dev_room';
+            currentUserSessionId = sessionId || localStorage.getItem('tronSessionId');
+
+            if (sessionId) {
+                localStorage.setItem('tronSessionId', sessionId);
+                urlParams.delete('session');
+                urlParams.delete('auth');
+                urlParams.delete('paid');
+                const remainingQuery = urlParams.toString();
+                const cleanPath = window.location.pathname + (remainingQuery ? '?' + remainingQuery : '');
+                window.history.replaceState(null, '', cleanPath + window.location.hash);
+            }
+
+            if (currentUserSessionId) {
+                try {
+                    const response = await fetch('/auth/status', {
+                        headers: { Authorization: 'Bearer ' + currentUserSessionId }
+                    });
+                    if (!response.ok) throw new Error('Could not check your session');
+                    const data = await response.json();
+                    isAuthenticated = data.authenticated;
+                    currentUser = isAuthenticated ? data.user : null;
+                    hasPaid = isAuthenticated && data.paid;
+                    if (!isAuthenticated) {
+                        localStorage.removeItem('tronSessionId');
+                        currentUserSessionId = null;
+                    }
+                } catch (error) {
+                    console.error('Error checking auth status:', error);
+                    isAuthenticated = false;
+                    currentUser = null;
+                    hasPaid = false;
+                }
+            } else if (urlParams.get('dev') === 'true') {
+                isDevMode = true;
+                isAuthenticated = true;
+                hasPaid = true;
+                currentUser = { id: 'dev_user', email: 'dev@test.com', name: 'Developer' };
+            }
+            updateAuthUI();
+        }
+
+        function updateAuthUI() {
+            const authStatus = document.getElementById('authStatus');
+            const zoomLoginBtn = document.getElementById('zoomLoginBtn');
+
+            if (isAuthenticated) {
+                if (hasPaid) {
+                    authStatus.innerHTML = '<p style="color: #00ff00;">&#x2705; Zoom authenticated - Lifetime access unlocked!</p>';
+                    zoomLoginBtn.style.display = 'none';
+                    console.log('User authenticated and paid, switching to game screen...');
+                    setTimeout(() => {
+                        switchToGameScreen();
+                    }, 1000);
+                } else {
+                    authStatus.innerHTML = '<p style="color: #ffff00;">&#x1F512; Zoom authenticated - Get lifetime access to play!</p>';
+                    zoomLoginBtn.textContent = 'LIFETIME ACCESS';
+                    zoomLoginBtn.onclick = initiatePayment;
+                    zoomLoginBtn.style.display = 'block';
+                }
+            } else {
+                authStatus.innerHTML = '<p style="color: #ff6666;">&#x1F6AB; Not authenticated - Login with Zoom for full experience</p>';
+                zoomLoginBtn.style.display = 'block';
+                zoomLoginBtn.textContent = 'LOGIN WITH ZOOM';
+                zoomLoginBtn.onclick = loginWithZoom;
+            }
+        }
+
+        function switchToGameScreen() {
+            // Hide welcome screen, show game screen
+            document.getElementById('welcomeScreen').classList.remove('active');
+            document.getElementById('gameScreen').classList.add('active');
+            // Show audio controls
+            document.getElementById('audioControls').classList.add('visible');
+            console.log('Game screen activated');
+        }
+
+        // ===== ORIGINAL WORKING GAME CLIENT =====
         let ws = null;
         let playerId = null;
         let isHost = false;
@@ -357,7 +624,8 @@
         let canvas = document.getElementById('canvas');
         let ctx = canvas.getContext('2d');
         let useBinaryProtocol = true;
-        
+
+        // Load sprite images
         const bikeImage = new Image();
         bikeImage.src = 'bike.png';
         let bikeImageLoaded = false;
@@ -365,7 +633,7 @@
             bikeImageLoaded = true;
             console.log('Bike sprite loaded');
         };
-        
+
         const discImage = new Image();
         discImage.src = 'disk.png';
         let discImageLoaded = false;
@@ -373,7 +641,8 @@
             discImageLoaded = true;
             console.log('Disc sprite loaded');
         };
-        
+
+        // Audio setup
         const track1 = document.getElementById('track1');
         const track2 = document.getElementById('track2');
         const deathSound = document.getElementById('deathSound');
@@ -384,49 +653,40 @@
         let musicShouldBePlaying = false;
         let masterVolume = 0.25;
         let previousPlayerAlive = true;
-        
+
         function fadeInAudio(audio, duration = 2000) {
             if (!audioEnabled) return;
-            
             audio.volume = 0;
-            console.log('Attempting to play:', audio.src);
             audio.play().then(() => {
-                console.log('Audio playing successfully');
+                console.log('Audio playing');
             }).catch(e => {
                 console.error('Audio play failed:', e);
                 musicShouldBePlaying = true;
             });
-            
             const steps = 50;
             const stepTime = duration / steps;
             const volumeIncrement = masterVolume / steps;
             let currentStep = 0;
-            
             if (fadeInterval) clearInterval(fadeInterval);
-            
             fadeInterval = setInterval(() => {
                 currentStep++;
                 audio.volume = Math.min(masterVolume, currentStep * volumeIncrement);
-                
                 if (currentStep >= steps) {
                     clearInterval(fadeInterval);
                     fadeInterval = null;
                 }
             }, stepTime);
         }
-        
+
         function fadeOutAudio(audio, duration = 2000) {
             const steps = 50;
             const stepTime = duration / steps;
             const volumeDecrement = audio.volume / steps;
             let currentStep = 0;
-            
             if (fadeInterval) clearInterval(fadeInterval);
-            
             fadeInterval = setInterval(() => {
                 currentStep++;
                 audio.volume = Math.max(0, audio.volume - volumeDecrement);
-                
                 if (currentStep >= steps) {
                     clearInterval(fadeInterval);
                     fadeInterval = null;
@@ -435,14 +695,12 @@
                 }
             }, stepTime);
         }
-        
+
         function startGameMusic() {
             musicShouldBePlaying = true;
             if (!audioEnabled) return;
-            
             currentTrack = track1;
             fadeInAudio(track1);
-            
             track1.onended = () => {
                 if (gameState && gameState.gameStarted && !gameState.gameOver) {
                     currentTrack = track2;
@@ -450,20 +708,19 @@
                 }
             };
         }
-        
+
         function stopGameMusic() {
             musicShouldBePlaying = false;
             if (currentTrack && !currentTrack.paused) {
                 fadeOutAudio(currentTrack);
             }
         }
-        
+
         function toggleAudio() {
             audioEnabled = !audioEnabled;
             const btn = document.getElementById('audioControl');
-            
             if (audioEnabled) {
-                btn.textContent = '🔊 SOUND ON';
+                btn.textContent = '\u{1F508} SOUND ON';
                 if (musicShouldBePlaying && gameState && gameState.gameStarted && !gameState.gameOver) {
                     currentTrack = track1;
                     fadeInAudio(track1);
@@ -475,33 +732,38 @@
                     };
                 }
             } else {
-                btn.textContent = '🔇 SOUND OFF';
+                btn.textContent = '\u{1F507} SOUND OFF';
                 if (currentTrack && !currentTrack.paused) {
                     fadeOutAudio(currentTrack);
                 }
             }
         }
-        
+
         function updateVolume(value) {
             masterVolume = value / 100;
             document.getElementById('volumeValue').textContent = value + '%';
-            
             if (currentTrack && !currentTrack.paused) {
                 currentTrack.volume = masterVolume;
             }
-            
             track1.volume = masterVolume;
             track2.volume = masterVolume;
         }
 
+        // Game mode toggle
         document.getElementById('gameMode').addEventListener('change', (e) => {
-            document.getElementById('timeLimitGroup').style.display = 
+            document.getElementById('timeLimitGroup').style.display =
                 e.target.value === 'time' ? 'block' : 'none';
-            document.getElementById('maxLivesGroup').style.display = 
+            document.getElementById('maxLivesGroup').style.display =
                 e.target.value === 'lives' ? 'block' : 'none';
         });
 
         function connectToGame() {
+            // Auth + payment gate
+            if (!isAuthenticated || !hasPaid) {
+                alert('Please login and purchase access to play the game!');
+                return;
+            }
+
             const playerName = document.getElementById('playerName').value.trim();
             if (!playerName) {
                 alert('Please enter your name');
@@ -518,24 +780,20 @@
                 const gameMode = document.getElementById('gameMode').value;
                 const timeLimit = parseInt(document.getElementById('timeLimit').value);
                 const maxLives = parseInt(document.getElementById('maxLives').value);
-                
-                ws.send(JSON.stringify({
-                    type: 'config',
-                    numPlayers: numPlayers,
-                    gameMode: gameMode,
-                    timeLimit: timeLimit,
-                    maxLives: maxLives
-                }));
-                
+
                 ws.send(JSON.stringify({
                     type: 'join',
-                    name: playerName
+                    name: playerName,
+                    roomId: currentRoomId,
+                    sessionId: currentUserSessionId,
+                    settings: { numPlayers, gameMode, timeLimit, maxLives }
                 }));
             };
 
             ws.onmessage = async (event) => {
                 let data;
-                
+
+                // Handle both binary (msgpack) and JSON messages
                 if (event.data instanceof Blob) {
                     const arrayBuffer = await event.data.arrayBuffer();
                     const uint8Array = new Uint8Array(arrayBuffer);
@@ -550,20 +808,25 @@
                     playerId = data.playerId;
                     isHost = data.isHost;
                     console.log('Joined as:', playerId, isHost ? '(HOST)' : '');
-                    
+
                     if (!isHost) {
                         document.getElementById('numPlayers').value = data.numPlayers;
                         document.getElementById('gameMode').value = data.gameMode;
                         document.getElementById('timeLimit').value = data.timeLimit;
                         document.getElementById('maxLives').value = data.maxLives;
-                        
+
                         document.getElementById('numPlayers').disabled = true;
                         document.getElementById('gameMode').disabled = true;
                         document.getElementById('timeLimit').disabled = true;
                         document.getElementById('maxLives').disabled = true;
                     }
-                    
-                    showScreen('lobby');
+
+                    showGameSection('lobby');
+                } else if (data.type === 'reconnected') {
+                    playerId = data.playerId;
+                    isHost = data.isHost;
+                    console.log('Reconnected seamlessly to active game!');
+                    showGameSection('game-container');
                 } else if (data.type === 'join_failed') {
                     alert('Failed to join: ' + data.reason);
                 } else if (data.type === 'host_disconnected') {
@@ -574,15 +837,16 @@
                 } else if (data.type === 'game_update') {
                     const wasStarted = gameState ? gameState.gameStarted : false;
                     const wasOver = gameState ? gameState.gameOver : false;
-                    
+
                     if (!gameState) {
                         gameState = data.state;
                     } else {
                         mergeDelta(gameState, data.state);
                     }
-                    
+
                     setupInterpolation();
-                    
+
+                    // Death sound
                     if (gameState.cycles && gameState.cycles[playerId]) {
                         const currentAlive = gameState.cycles[playerId].alive;
                         if (previousPlayerAlive && !currentAlive && audioEnabled) {
@@ -591,16 +855,16 @@
                         }
                         previousPlayerAlive = currentAlive;
                     }
-                    
+
                     if (gameState.gameStarted && !gameState.gameOver) {
                         if (!wasStarted) {
                             startGameMusic();
                         }
-                        showScreen('game-container');
+                        showGameSection('game-container');
                         drawGame();
                     } else if (gameState.gameOver && !wasOver) {
                         stopGameMusic();
-                        showScreen('game-over');
+                        showGameSection('game-over');
                         showGameOver();
                     }
                 }
@@ -614,24 +878,25 @@
             ws.onclose = () => {
                 console.log('Disconnected from server');
             };
-            
+
             console.log('WebSocket connecting...');
         }
 
-        function showScreen(screenId) {
+        // Show/hide sections WITHIN the game screen
+        function showGameSection(sectionId) {
             document.querySelectorAll('#menu, #lobby, #game-container, #game-over').forEach(el => {
                 el.classList.remove('active');
             });
-            document.getElementById(screenId).classList.add('active');
+            document.getElementById(sectionId).classList.add('active');
         }
 
         function updateLobby(data) {
             const hostIndicator = isHost ? ' (YOU ARE HOST)' : '';
-            document.getElementById('lobbyPlayers').textContent = 
+            document.getElementById('lobbyPlayers').textContent =
                 `Players: ${data.players}/${data.max_players}${hostIndicator}`;
-            document.getElementById('lobbyReady').textContent = 
+            document.getElementById('lobbyReady').textContent =
                 `Ready: ${data.ready_count}/${data.max_players}`;
-            document.getElementById('lobbyMode').textContent = 
+            document.getElementById('lobbyMode').textContent =
                 `Mode: ${data.game_mode.toUpperCase()}`;
         }
 
@@ -641,9 +906,9 @@
             }
         }
 
+        // ===== Delta merging (for compressed game state updates) =====
         function mergeDelta(state, delta) {
             if (!delta) return;
-            
             for (const key in delta) {
                 if (key === 'cycles' && delta.cycles) {
                     if (!state.cycles) state.cycles = {};
@@ -659,10 +924,9 @@
                 }
             }
         }
-        
+
         function setupInterpolation() {
             if (!gameState || !gameState.cycles) return;
-            
             for (const [id, cycle] of Object.entries(gameState.cycles)) {
                 if (!interpolationTargets[id]) {
                     interpolationTargets[id] = { x: cycle.x, y: cycle.y };
@@ -672,13 +936,11 @@
                 }
             }
         }
-        
+
         function applyClientPrediction(direction) {
             if (!gameState || !playerId || !gameState.cycles[playerId]) return;
-            
             const cycle = gameState.cycles[playerId];
             const opposites = { UP: 'DOWN', DOWN: 'UP', LEFT: 'RIGHT', RIGHT: 'LEFT' };
-            
             if (direction !== opposites[cycle.direction]) {
                 predictedState[playerId] = {
                     direction: direction,
@@ -687,25 +949,26 @@
             }
         }
 
+        // ===== Input handling =====
         function sendInput(direction) {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 applyClientPrediction(direction);
                 ws.send(JSON.stringify({ type: 'input', direction: direction }));
             }
         }
-        
+
         function sendDisconnectTrail() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'disconnect_trail' }));
             }
         }
-        
+
         function sendHoldDisc() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'hold_disc' }));
             }
         }
-        
+
         function sendReleaseDisc() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'release_disc' }));
@@ -714,7 +977,6 @@
 
         document.addEventListener('keydown', (e) => {
             if (!gameState || !gameState.gameStarted || gameState.gameOver) return;
-
             const key = e.key.toLowerCase();
             if (key === 'w') sendInput('UP');
             else if (key === 's') sendInput('DOWN');
@@ -729,10 +991,9 @@
                 sendHoldDisc();
             }
         });
-        
+
         document.addEventListener('keyup', (e) => {
             if (!gameState || !gameState.gameStarted || gameState.gameOver) return;
-            
             const key = e.key.toLowerCase();
             if (key === 'e') {
                 e.preventDefault();
@@ -740,6 +1001,7 @@
             }
         });
 
+        // ===== GAME RENDERER (the full working one) =====
         function drawGame() {
             if (!gameState) return;
 
@@ -755,6 +1017,7 @@
             const offsetX = (canvas.width - gridWidth * cellSize) / 2;
             const offsetY = (canvas.height - 100 - gridHeight * cellSize) / 2;
 
+            // Draw grid
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
             ctx.lineWidth = 1;
             for (let x = 0; x <= gridWidth * cellSize; x += cellSize) {
@@ -771,26 +1034,27 @@
             }
 
             const cycles = Object.values(gameState.cycles);
-            
+
             for (const cycle of cycles) {
                 const [r, g, b] = cycle.color;
                 const color = `rgb(${r}, ${g}, ${b})`;
-                
+
+                // Death fade effect
                 let deathFadeAlpha = 1;
                 if (cycle.fading && cycle.deathTimestamp) {
                     const timeSinceDeath = Date.now() - cycle.deathTimestamp;
                     deathFadeAlpha = Math.max(0, 1 - (timeSinceDeath / 3000));
                 }
-                
+
+                // Draw disconnected trails (fading)
                 if (cycle.disconnectedTrails) {
                     for (const trailObj of cycle.disconnectedTrails) {
                         const age = Date.now() - trailObj.timestamp;
                         const fadeAlpha = Math.max(0, 1 - (age / 4000));
-                        
+
                         for (const [x, y] of trailObj.trail) {
                             const screenX = offsetX + x * cellSize;
                             const screenY = offsetY + y * cellSize;
-                            
                             ctx.fillStyle = color;
                             ctx.globalAlpha = fadeAlpha * 0.5 * deathFadeAlpha;
                             ctx.fillRect(screenX, screenY, cellSize, cellSize);
@@ -798,6 +1062,7 @@
                     }
                 }
 
+                // Draw active trail + bike sprite
                 for (let i = 0; i < cycle.trail.length; i++) {
                     const [x, y] = cycle.trail[i];
                     const screenX = offsetX + x * cellSize;
@@ -808,17 +1073,18 @@
                     ctx.globalAlpha = alpha * deathFadeAlpha;
                     ctx.fillRect(screenX, screenY, cellSize, cellSize);
 
+                    // Draw bike at head of trail
                     if (i === cycle.trail.length - 1 && bikeImageLoaded) {
                         let displayX = x;
                         let displayY = y;
-                        
+
                         if (interpolationTargets[cycle.playerId]) {
                             const target = interpolationTargets[cycle.playerId];
                             const lerpFactor = 0.3;
                             displayX = x + (target.x - x) * lerpFactor;
                             displayY = y + (target.y - y) * lerpFactor;
                         }
-                        
+
                         if (predictedState[cycle.playerId]) {
                             const predicted = predictedState[cycle.playerId];
                             if (Date.now() - predicted.timestamp < 100) {
@@ -827,112 +1093,116 @@
                                 delete predictedState[cycle.playerId];
                             }
                         }
-                        
+
                         const displayScreenX = offsetX + displayX * cellSize;
                         const displayScreenY = offsetY + displayY * cellSize;
                         ctx.save();
-                        
+
                         const bikeSize = cellSize * 3;
                         const bikeCenterX = displayScreenX + cellSize / 2;
                         const bikeCenterY = displayScreenY + cellSize / 2;
-                        
+
                         ctx.translate(bikeCenterX, bikeCenterY);
-                        
+
                         const rotations = { UP: 0, RIGHT: Math.PI / 2, DOWN: Math.PI, LEFT: -Math.PI / 2 };
                         ctx.rotate(rotations[cycle.direction] || 0);
-                        
+
                         if (cycle.speedBoost) {
                             ctx.shadowBlur = 30;
                             ctx.shadowColor = color;
                         }
-                        
+
                         ctx.globalAlpha = deathFadeAlpha;
                         ctx.drawImage(bikeImage, -bikeSize / 2, -bikeSize / 2, bikeSize, bikeSize);
-                        
+
                         ctx.shadowBlur = 0;
                         ctx.restore();
                     }
                 }
                 ctx.globalAlpha = 1;
-                
+
+                // Draw identity disc
                 if (cycle.disc && discImageLoaded) {
                     const discX = offsetX + cycle.disc.x * cellSize;
                     const discY = offsetY + cycle.disc.y * cellSize;
-                    
+
                     ctx.save();
                     ctx.translate(discX + cellSize / 2, discY + cellSize / 2);
-                    
-                    const discRotation = Math.atan2(cycle.disc.vy, cycle.disc.vx);
+
+                    const discRotation = Math.atan2(cycle.disc.vy || 0, cycle.disc.vx || 0);
                     ctx.rotate(discRotation);
-                    
+
                     ctx.shadowBlur = 20;
                     ctx.shadowColor = color;
-                    
+
                     const discSize = cellSize * 2;
                     ctx.drawImage(discImage, -discSize / 2, -discSize / 2, discSize, discSize);
-                    
+
                     ctx.shadowBlur = 0;
                     ctx.restore();
                 }
             }
-            
+
+            // Draw power-up
             if (gameState.powerUp) {
                 const pu = gameState.powerUp;
                 const puX = offsetX + pu.x * cellSize;
                 const puY = offsetY + pu.y * cellSize;
-                
+
                 ctx.shadowBlur = 30;
                 ctx.shadowColor = '#ffff00';
                 ctx.fillStyle = '#ffff00';
                 ctx.globalAlpha = 0.9 + Math.sin(Date.now() / 100) * 0.1;
                 ctx.fillRect(puX, puY, pu.width * cellSize, pu.height * cellSize);
-                
+
                 ctx.shadowBlur = 50;
                 ctx.globalAlpha = 0.3;
                 ctx.fillRect(puX - cellSize, puY - cellSize, (pu.width + 2) * cellSize, (pu.height + 2) * cellSize);
-                
+
                 ctx.shadowBlur = 0;
                 ctx.globalAlpha = 1;
             }
-            
+
+            // Draw walls
             if (gameState.walls) {
                 for (const wall of gameState.walls) {
                     const age = Date.now() - wall.timestamp;
                     const fadeAlpha = age > 17000 ? Math.max(0, 1 - (age - 17000) / 3000) : 1;
-                    
+
                     ctx.shadowBlur = 40;
                     ctx.shadowColor = `rgba(255, 255, 255, ${fadeAlpha * 0.8})`;
-                    
+
                     for (const [dx, dy] of wall.cells) {
                         const cellX = offsetX + (wall.x + dx) * cellSize;
                         const cellY = offsetY + (wall.y + dy) * cellSize;
-                        
+
                         ctx.fillStyle = `rgba(120, 120, 120, ${fadeAlpha})`;
                         ctx.globalAlpha = 1;
                         ctx.fillRect(cellX, cellY, cellSize, cellSize);
-                        
+
                         ctx.fillStyle = `rgba(180, 180, 180, ${fadeAlpha * 0.8})`;
                         ctx.fillRect(cellX + cellSize * 0.2, cellY + cellSize * 0.2, cellSize * 0.6, cellSize * 0.6);
                     }
-                    
+
                     ctx.strokeStyle = `rgba(200, 200, 200, ${fadeAlpha})`;
                     ctx.lineWidth = 2;
-                    
+
                     for (const [dx, dy] of wall.cells) {
                         const cellX = offsetX + (wall.x + dx) * cellSize;
                         const cellY = offsetY + (wall.y + dy) * cellSize;
                         ctx.strokeRect(cellX, cellY, cellSize, cellSize);
                     }
-                    
+
                     ctx.shadowBlur = 0;
                     ctx.globalAlpha = 1;
                 }
             }
 
+            // Draw scoreboard
             const scoreboard = document.getElementById('scoreboard');
             scoreboard.innerHTML = '';
             const sortedCycles = Object.values(gameState.cycles).sort((a, b) => b.score - a.score);
-            
+
             for (const cycle of sortedCycles.slice(0, 5)) {
                 const [r, g, b] = cycle.color;
                 const color = `rgb(${r}, ${g}, ${b})`;
@@ -940,15 +1210,16 @@
                 scoreDiv.className = 'player-score';
                 scoreDiv.style.borderColor = color;
                 scoreDiv.style.color = color;
-                
+
                 if (gameState.gameMode === 'lives') {
-                    scoreDiv.textContent = `${cycle.name}: ${cycle.lives} ❤️`;
+                    scoreDiv.textContent = `${cycle.name}: ${cycle.lives} \u2764\uFE0F`;
                 } else {
-                    scoreDiv.textContent = `${cycle.name}: ${cycle.deaths} 💀`;
+                    scoreDiv.textContent = `${cycle.name}: ${cycle.deaths} \u{1F480}`;
                 }
                 scoreboard.appendChild(scoreDiv);
             }
 
+            // Draw timer
             if (gameState.gameMode === 'time') {
                 const timeRemaining = Math.ceil(gameState.timeRemaining);
                 document.getElementById('timer').textContent = `Time: ${timeRemaining}s`;
@@ -959,7 +1230,6 @@
 
         function showGameOver() {
             if (!gameState || !gameState.winner) return;
-
             const [r, g, b] = gameState.winner.color;
             const color = `rgb(${r}, ${g}, ${b})`;
             const winnerText = document.getElementById('winnerText');
@@ -967,14 +1237,24 @@
             winnerText.style.color = color;
         }
 
+        // Game render loop
         function gameLoop() {
             if (gameState && gameState.gameStarted && !gameState.gameOver) {
                 drawGame();
             }
             requestAnimationFrame(gameLoop);
         }
-        
+
         requestAnimationFrame(gameLoop);
+
+        // ===== INIT =====
+        document.getElementById('audioControl').addEventListener('click', toggleAudio);
+        document.getElementById('volumeSlider').addEventListener('input', event => updateVolume(event.target.value));
+        document.getElementById('zoomLoginBtn').onclick = loginWithZoom;
+        document.getElementById('joinGameBtn').addEventListener('click', connectToGame);
+        document.getElementById('readyBtn').addEventListener('click', sendReady);
+        document.getElementById('playAgainBtn').addEventListener('click', () => location.reload());
+        checkAuthStatus();
     </script>
 </body>
 </html>

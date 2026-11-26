@@ -1,5 +1,102 @@
 # Changelog - TRON Light Cycles Game
 
+## Version 2.2.0 - March 23, 2026
+
+### 🔒 MAJOR SECURITY CHANGE: Server-Side Session Migration
+
+**Breaking Change for Security Enhancement**
+- **Issue**: Client-side cookies exposed user data in URLs and browser storage
+- **Risk**: User authentication tokens and personal data accessible via browser history, logs, and referer headers
+- **Solution**: Migrated to server-side session management with secure session IDs
+
+### 🛡️ Security Improvements
+
+#### **Server-Side Session Management**
+- **Removed**: Client-side cookies with user data
+- **Added**: Secure server-side sessions with random 32-byte session IDs
+- **Benefit**: User data no longer exposed in URLs, browser storage, or logs
+- **Database**: `user_sessions` table stores session data with expiration
+- **Session Flow**: 
+  1. User authenticates via Zoom OAuth
+  2. Server creates secure session with 24-hour expiration
+  3. Client receives only session ID (no user data)
+  4. All user lookups happen server-side
+
+#### **URL Security Enhancement**
+- **Before**: `/?auth=success&paid=true&user_id=xxx&email=xxx`
+- **After**: `/?auth=success&paid=true&session=xxx` (session ID only)
+- **Impact**: Prevents user data leakage through browser history, server logs, referer headers
+- **Compliance**: Better privacy and security practices
+
+### 💳 Payment System Updates
+
+#### **Stripe API Modernization**
+- **Fixed**: Deprecated Stripe API fields causing payment session failures
+- **Removed**: `description` field from line_items (deprecated)
+- **Added**: `allow_promotion_codes: true` for promo code functionality
+- **Enhanced**: Payment verification with server-side session validation
+
+#### **Payment Flow Security**
+- **Issue**: Payment verification failed due to missing user metadata
+- **Fix**: Secure session-based payment verification
+- **Process**: 
+  1. Payment session created with server-side session validation
+  2. Success callback verifies payment server-side
+  3. User granted access without exposing data in URLs
+
+### 🎨 UI/UX Improvements
+
+#### **Marketing Simplification**
+- **Removed**: Complex marketing features section
+- **Cleaned**: Welcome screen for better user experience
+- **Removed**: Unused CSS and JavaScript references
+- **Result**: Cleaner, faster loading interface
+
+### 📊 Database Schema Changes
+
+#### **New Tables**
+```sql
+-- User sessions (replaces client-side cookies)
+CREATE TABLE user_sessions (
+    session_id TEXT PRIMARY KEY,
+    zoom_user_id TEXT NOT NULL,
+    user_email TEXT,
+    user_name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL
+);
+```
+
+#### **Session Security Features**
+- 24-hour automatic expiration
+- Cryptographically secure session IDs
+- Server-side validation only
+- No user data in client responses
+
+### 🔧 Migration Impact
+
+#### **Systems Affected**
+- ✅ Authentication flow (completely secure)
+- ✅ Payment processing (server-side verification)
+- ✅ User state management (no client data exposure)
+- ⚠️ Session expiration handling (needs testing)
+- ⚠️ Cross-tab synchronization (needs testing)
+
+#### **Breaking Changes**
+- Client-side cookie dependencies removed
+- All user data now server-side only
+- URLs no longer contain user information
+
+### 🚨 Security Benefits
+
+1. **No User Data in URLs** - Prevents data leakage
+2. **Server-Side Validation** - All authentication happens server-side
+3. **Session Expiration** - Automatic cleanup reduces attack surface
+4. **Secure Session IDs** - Cryptographically random, unpredictable
+5. **Reduced Client Exposure** - Browser stores only session IDs
+
+---
+
 ## Version 2.1.0 - February 27, 2026
 
 ### ⚠️ CRITICAL: Platform Compatibility Fix

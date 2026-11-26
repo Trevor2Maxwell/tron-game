@@ -1,3 +1,13 @@
+# DEPRECATED: This Python client is deprecated in favor of the web browser client
+# Use: Open http://localhost:3000 in your browser instead of python client.py
+#
+# Legacy TCP socket client - kept for reference only
+# The new web client provides:
+# - WebSocket connectivity for Fly.io auto-stop
+# - Zoom integration compatibility
+# - Better graphics and performance
+# - No installation required (runs in browser)
+
 import pygame
 import socket
 import threading

@@ -2,6 +2,9 @@ node_modules
 npm-debug.log
 .git
 .gitignore
+.env*
+output/
+tmp/
 README.md
 WEB-README.md
 .DS_Store

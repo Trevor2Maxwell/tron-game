@@ -1,3 +1,13 @@
+# DEPRECATED: This Python TCP server is deprecated in favor of the WebSocket server in web-server.js
+# Use: npm start (Node.js WebSocket server) instead of python server.py
+# 
+# Legacy TCP socket server - kept for reference only
+# The new WebSocket server provides:
+# - Auto-stop capability for Fly.io cost savings
+# - Zoom integration compatibility  
+# - Better web browser support
+# - Single unified server architecture
+
 import socket
 import threading
 import json
